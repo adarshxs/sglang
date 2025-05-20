@@ -1,5 +1,7 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/distributed/device_communicators/shm_broadcast.py
 
+import hashlib
+import hmac
 import logging
 import os
 import pickle
@@ -164,6 +166,7 @@ class Handle:
     buffer: Optional[ShmRingBuffer] = None
     local_subscribe_port: Optional[int] = None
     remote_subscribe_port: Optional[int] = None
+    secret_key: Optional[bytes] = None
 
 
 class MessageQueue:
@@ -176,6 +179,7 @@ class MessageQueue:
         max_chunk_bytes: int = 1024 * 1024 * 10,
         max_chunks: int = 10,
         connect_ip: Optional[str] = None,
+        secret_key: Optional[bytes] = None,
     ):
         if local_reader_ranks is None:
             local_reader_ranks = list(range(n_local_reader))
@@ -184,6 +188,11 @@ class MessageQueue:
         self.n_local_reader = n_local_reader
         n_remote_reader = n_reader - n_local_reader
         self.n_remote_reader = n_remote_reader
+
+        if n_reader > 0 and secret_key is None:
+            self.secret_key = os.urandom(32)
+        else:
+            self.secret_key = secret_key
 
         if connect_ip is None:
             connect_ip = get_ip() if n_remote_reader > 0 else "127.0.0.1"
@@ -245,6 +254,7 @@ class MessageQueue:
             buffer=self.buffer,
             local_subscribe_port=local_subscribe_port,
             remote_subscribe_port=remote_subscribe_port,
+            secret_key=self.secret_key,
         )
 
         logger.debug("Message queue communication handle: %s", self.handle)
@@ -257,6 +267,7 @@ class MessageQueue:
         self = MessageQueue.__new__(MessageQueue)
         self.handle = handle
         self._is_writer = False
+        self.secret_key = handle.secret_key
 
         context = Context()
 
@@ -427,33 +438,64 @@ class MessageQueue:
     def enqueue(self, obj):
         assert self._is_writer, "Only writers can enqueue"
         serialized_obj = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+        assert self.secret_key is not None, "Secret key must be set for enqueue if there are readers."
+        signature = hmac.new(self.secret_key, serialized_obj, hashlib.sha256).digest()
+
         if self.n_local_reader > 0:
-            if len(serialized_obj) >= self.buffer.max_chunk_bytes:
+            # max_chunk_bytes must accommodate overflow byte, signature, and object
+            if len(signature) + len(serialized_obj) >= self.buffer.max_chunk_bytes - 1:
                 with self.acquire_write() as buf:
                     buf[0] = 1  # overflow
-                self.local_socket.send(serialized_obj)
+                # Send signature + serialized_obj via local_socket if overflow
+                self.local_socket.send(signature + serialized_obj)
             else:
                 with self.acquire_write() as buf:
                     buf[0] = 0  # not overflow
-                    buf[1 : len(serialized_obj) + 1] = serialized_obj
+                    buf[1 : 1 + len(signature)] = signature
+                    buf[1 + len(signature) : 1 + len(signature) + len(serialized_obj)] = serialized_obj
         if self.n_remote_reader > 0:
-            self.remote_socket.send(serialized_obj)
+            self.remote_socket.send_multipart([signature, serialized_obj])
 
     def dequeue(self):
+        assert self.secret_key is not None, "Secret key must be set for dequeue if it's a reader."
+        SIGNATURE_SIZE = 32  # SHA256 produces a 32-byte signature
+
         if self._is_local_reader:
+            obj = None  # Initialize obj
             with self.acquire_read() as buf:
                 overflow = buf[0] == 1
                 if not overflow:
-                    # no need to know the size of serialized object
-                    # pickle format contains the size information internally
-                    # see https://docs.python.org/3/library/pickle.html
-                    obj = pickle.loads(buf[1:])
-            if overflow:
-                recv = self.local_socket.recv()
-                obj = pickle.loads(recv)
+                    received_signature = bytes(buf[1:1+SIGNATURE_SIZE])
+                    serialized_obj_bytes = bytes(buf[1+SIGNATURE_SIZE:])
+                    
+                    expected_signature = hmac.new(self.secret_key, serialized_obj_bytes, hashlib.sha256).digest()
+                    if not hmac.compare_digest(received_signature, expected_signature):
+                        raise ValueError("HMAC signature verification failed for shared memory message.")
+                    obj = pickle.loads(serialized_obj_bytes)
+                # No else here, handle overflow after the 'with' block if needed,
+                # but the original logic for overflow reads from socket, not buf.
+            
+            if overflow: # This 'if' is now correctly placed conceptually.
+                received_parts = self.local_socket.recv()
+                received_signature = received_parts[:SIGNATURE_SIZE]
+                serialized_obj_bytes = received_parts[SIGNATURE_SIZE:]
+
+                expected_signature = hmac.new(self.secret_key, serialized_obj_bytes, hashlib.sha256).digest()
+                if not hmac.compare_digest(received_signature, expected_signature):
+                    raise ValueError("HMAC signature verification failed for shared memory overflow message.")
+                obj = pickle.loads(serialized_obj_bytes)
+
         elif self._is_remote_reader:
-            recv = self.remote_socket.recv()
-            obj = pickle.loads(recv)
+            parts = self.remote_socket.recv_multipart()
+            if len(parts) != 2:
+                raise ValueError("Invalid multipart message received.")
+            
+            received_signature, serialized_obj_bytes = parts[0], parts[1]
+            
+            expected_signature = hmac.new(self.secret_key, serialized_obj_bytes, hashlib.sha256).digest()
+            if not hmac.compare_digest(received_signature, expected_signature):
+                raise ValueError("HMAC signature verification failed for ZeroMQ message.")
+            obj = pickle.loads(serialized_obj_bytes)
         else:
             raise RuntimeError("Only readers can dequeue")
         return obj
