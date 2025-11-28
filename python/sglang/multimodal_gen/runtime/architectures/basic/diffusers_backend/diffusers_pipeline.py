@@ -49,6 +49,10 @@ class DiffusersExecutionStage(PipelineStage):
         # Build kwargs from batch
         kwargs = self._build_pipeline_kwargs(batch, server_args)
 
+        # Request tensor output from diffusers for cleaner handling
+        if "output_type" not in kwargs:
+            kwargs["output_type"] = "pt"
+
         logger.info(
             "Executing diffusers pipeline with kwargs: %s",
             {k: type(v).__name__ for k, v in kwargs.items()},
@@ -57,7 +61,16 @@ class DiffusersExecutionStage(PipelineStage):
         # Execute the diffusers pipeline, catching warnings
         with torch.no_grad(), warnings.catch_warnings(record=True) as caught_warnings:
             warnings.simplefilter("always")
-            output = self.diffusers_pipe(**kwargs)
+            try:
+                output = self.diffusers_pipe(**kwargs)
+            except TypeError as e:
+                # Some pipelines don't support output_type="pt", fall back to default
+                if "output_type" in str(e):
+                    logger.debug("Pipeline doesn't support output_type='pt', retrying with default")
+                    kwargs.pop("output_type", None)
+                    output = self.diffusers_pipe(**kwargs)
+                else:
+                    raise
 
             # Check if there were NaN warnings during generation
             nan_warning = any("invalid value" in str(w.message) for w in caught_warnings)
@@ -74,69 +87,99 @@ class DiffusersExecutionStage(PipelineStage):
         return batch
 
     def _extract_output(self, output: Any) -> torch.Tensor | None:
-        """Extract tensor output from pipeline result."""
+        """Extract tensor output from pipeline result.
+        
+        Diffusers pipelines return output in various formats. We try to extract
+        tensors from common attributes in order of preference.
+        """
+        import numpy as np
         import torchvision.transforms as T
 
-        result = None
+        # Check common output attributes in order of preference
+        for attr in ["images", "frames", "video", "sample", "pred_original_sample"]:
+            if not hasattr(output, attr):
+                continue
+            
+            data = getattr(output, attr)
+            if data is None:
+                continue
 
-        logger.debug("Pipeline output type: %s", type(output).__name__)
-        logger.debug("Pipeline output attributes: %s", [a for a in dir(output) if not a.startswith("_")])
+            result = self._convert_to_tensor(data)
+            if result is not None:
+                logger.info("Extracted output from '%s': shape=%s, dtype=%s", 
+                           attr, result.shape, result.dtype)
+                return result
 
-        # Try to get images
-        if hasattr(output, "images"):
-            images = output.images
-            logger.debug("Found images attribute, type: %s", type(images).__name__)
+        logger.warning("Could not extract output from pipeline result. "
+                      "Available attributes: %s", 
+                      [a for a in dir(output) if not a.startswith("_")])
+        return None
 
-            if isinstance(images, list) and len(images) > 0:
-                logger.debug("Images is list with %d items, first item type: %s",
-                           len(images), type(images[0]).__name__)
+    def _convert_to_tensor(self, data: Any) -> torch.Tensor | None:
+        """Convert various data formats to a tensor."""
+        import numpy as np
+        import torchvision.transforms as T
 
-                if hasattr(images[0], "mode"):  # PIL Image
-                    logger.debug("Converting PIL images to tensors, size: %s", images[0].size)
-                    transform = T.ToTensor()
-                    tensors = [transform(img) for img in images]
-                    result = torch.stack(tensors) if len(tensors) > 1 else tensors[0]
-                elif isinstance(images[0], torch.Tensor):
-                    logger.debug("Images are tensors, shape: %s", images[0].shape)
-                    result = torch.stack(images) if len(images) > 1 else images[0]
-            elif isinstance(images, torch.Tensor):
-                logger.debug("Images is tensor, shape: %s", images.shape)
-                result = images
-            elif hasattr(images, "mode"):  # Single PIL image
-                logger.debug("Single PIL image, size: %s", images.size)
-                result = T.ToTensor()(images)
+        # Already a tensor
+        if isinstance(data, torch.Tensor):
+            return data
 
-        # Try to get frames (video)
-        elif hasattr(output, "frames"):
-            frames = output.frames
-            logger.debug("Found frames attribute, type: %s", type(frames).__name__)
+        # Numpy array
+        if isinstance(data, np.ndarray):
+            tensor = torch.from_numpy(data).float()
+            # Normalize to [0, 1] if needed
+            if tensor.max() > 1.0:
+                tensor = tensor / 255.0
+            # Handle common numpy formats: (B, H, W, C) or (B, T, H, W, C)
+            if tensor.ndim == 4:  # (B, H, W, C) -> (B, C, H, W)
+                tensor = tensor.permute(0, 3, 1, 2)
+            elif tensor.ndim == 5:  # (B, T, H, W, C) -> (B, C, T, H, W)
+                tensor = tensor.permute(0, 4, 1, 2, 3)
+            return tensor
 
-            if isinstance(frames, list) and len(frames) > 0:
-                if hasattr(frames[0], "mode"):  # PIL Image
-                    transform = T.ToTensor()
-                    tensors = [transform(img) for img in frames]
-                    result = torch.stack(tensors)
-                elif isinstance(frames[0], torch.Tensor):
-                    result = torch.stack(frames) if len(frames) > 1 else frames[0]
-            elif isinstance(frames, torch.Tensor):
-                result = frames
+        # PIL Image
+        if hasattr(data, "mode"):
+            return T.ToTensor()(data)
 
-        # Fallback to other attributes
-        if result is None:
-            for attr in ["sample", "pred_original_sample"]:
-                if hasattr(output, attr):
-                    val = getattr(output, attr)
-                    if isinstance(val, torch.Tensor):
-                        logger.debug("Using fallback attribute '%s', shape: %s", attr, val.shape)
-                        result = val
-                        break
+        # List of items
+        if isinstance(data, list) and len(data) > 0:
+            first = data[0]
+            
+            # Nested list (e.g., [[frame1, frame2, ...]] for video batches)
+            if isinstance(first, list) and len(first) > 0:
+                data = first  # Take first batch item
+                first = data[0]
 
-        if result is not None:
-            logger.info("Extracted output tensor shape: %s, dtype: %s", result.shape, result.dtype)
-        else:
-            logger.warning("Could not extract output from pipeline result")
+            # List of PIL images
+            if hasattr(first, "mode"):
+                tensors = [T.ToTensor()(img) for img in data]
+                stacked = torch.stack(tensors)  # (N, C, H, W)
+                # For video (multiple frames), permute to (C, T, H, W)
+                if len(tensors) > 1:
+                    return stacked.permute(1, 0, 2, 3)
+                return stacked[0]  # Single image
 
-        return result
+            # List of tensors
+            if isinstance(first, torch.Tensor):
+                stacked = torch.stack(data)
+                if len(data) > 1:
+                    return stacked.permute(1, 0, 2, 3)
+                return stacked[0]
+
+            # List of numpy arrays
+            if isinstance(first, np.ndarray):
+                tensors = [torch.from_numpy(arr).float() for arr in data]
+                if tensors[0].max() > 1.0:
+                    tensors = [t / 255.0 for t in tensors]
+                # (H, W, C) -> (C, H, W)
+                if tensors[0].ndim == 3:
+                    tensors = [t.permute(2, 0, 1) for t in tensors]
+                stacked = torch.stack(tensors)
+                if len(data) > 1:
+                    return stacked.permute(1, 0, 2, 3)
+                return stacked[0]
+
+        return None
 
     def _postprocess_output(self, output: torch.Tensor) -> torch.Tensor:
         """Post-process output tensor to ensure valid values and correct shape."""
