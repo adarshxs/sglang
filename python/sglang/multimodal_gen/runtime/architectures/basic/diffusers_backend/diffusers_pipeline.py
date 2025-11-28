@@ -78,22 +78,38 @@ class DiffusersExecutionStage(PipelineStage):
 
         result = None
 
+        logger.debug("Pipeline output type: %s", type(output).__name__)
+        logger.debug("Pipeline output attributes: %s", [a for a in dir(output) if not a.startswith("_")])
+
         # Try to get images
         if hasattr(output, "images"):
             images = output.images
+            logger.debug("Found images attribute, type: %s", type(images).__name__)
+
             if isinstance(images, list) and len(images) > 0:
+                logger.debug("Images is list with %d items, first item type: %s",
+                           len(images), type(images[0]).__name__)
+
                 if hasattr(images[0], "mode"):  # PIL Image
+                    logger.debug("Converting PIL images to tensors, size: %s", images[0].size)
                     transform = T.ToTensor()
                     tensors = [transform(img) for img in images]
                     result = torch.stack(tensors) if len(tensors) > 1 else tensors[0]
                 elif isinstance(images[0], torch.Tensor):
+                    logger.debug("Images are tensors, shape: %s", images[0].shape)
                     result = torch.stack(images) if len(images) > 1 else images[0]
             elif isinstance(images, torch.Tensor):
+                logger.debug("Images is tensor, shape: %s", images.shape)
                 result = images
+            elif hasattr(images, "mode"):  # Single PIL image
+                logger.debug("Single PIL image, size: %s", images.size)
+                result = T.ToTensor()(images)
 
         # Try to get frames (video)
         elif hasattr(output, "frames"):
             frames = output.frames
+            logger.debug("Found frames attribute, type: %s", type(frames).__name__)
+
             if isinstance(frames, list) and len(frames) > 0:
                 if hasattr(frames[0], "mode"):  # PIL Image
                     transform = T.ToTensor()
@@ -110,13 +126,19 @@ class DiffusersExecutionStage(PipelineStage):
                 if hasattr(output, attr):
                     val = getattr(output, attr)
                     if isinstance(val, torch.Tensor):
+                        logger.debug("Using fallback attribute '%s', shape: %s", attr, val.shape)
                         result = val
                         break
+
+        if result is not None:
+            logger.info("Extracted output tensor shape: %s, dtype: %s", result.shape, result.dtype)
+        else:
+            logger.warning("Could not extract output from pipeline result")
 
         return result
 
     def _postprocess_output(self, output: torch.Tensor) -> torch.Tensor:
-        """Post-process output tensor to ensure valid values."""
+        """Post-process output tensor to ensure valid values and correct shape."""
         # Handle NaN or Inf values
         has_invalid = torch.isnan(output).any() or torch.isinf(output).any()
         if has_invalid:
@@ -145,6 +167,29 @@ class DiffusersExecutionStage(PipelineStage):
         # Clamp to valid range
         output = output.clamp(0, 1)
 
+        # Ensure correct tensor shape for downstream processing
+        # Expected format: (C, H, W) for images or (C, T, H, W) for videos
+        # The downstream post_process_sample expects at least 3D
+        if output.dim() == 2:
+            # (H, W) -> (1, H, W) - grayscale image
+            output = output.unsqueeze(0)
+        elif output.dim() == 4:
+            # (B, C, H, W) -> (C, H, W) if batch size is 1
+            if output.shape[0] == 1:
+                output = output.squeeze(0)
+
+        # For images, ensure we have (C, H, W) format with C=3 for RGB
+        if output.dim() == 3:
+            c, h, w = output.shape
+            # If channels are last (H, W, C), transpose
+            if c > 4 and w <= 4:
+                output = output.permute(2, 0, 1)
+                c, h, w = output.shape
+            # If grayscale, expand to RGB
+            if output.shape[0] == 1:
+                output = output.repeat(3, 1, 1)  # Use repeat instead of expand for contiguous memory
+
+        logger.info("Final output tensor shape: %s", output.shape)
         return output
 
     def _build_pipeline_kwargs(self, batch: Req, server_args: ServerArgs) -> dict:
