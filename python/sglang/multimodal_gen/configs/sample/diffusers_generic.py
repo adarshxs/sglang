@@ -17,6 +17,10 @@ class DiffusersGenericSamplingParams(SamplingParams):
 
     These parameters cover the most common options across different diffusers pipelines.
     The diffusers pipeline will use whichever parameters it supports.
+
+    Note: We don't add diffusers-specific fields here because they get passed
+    to Req which doesn't support them. Instead, use the `extra` dict in Req
+    for pipeline-specific parameters.
     """
 
     # Override defaults with more conservative values that work across pipelines
@@ -26,10 +30,6 @@ class DiffusersGenericSamplingParams(SamplingParams):
     num_inference_steps: int = 30
     guidance_scale: float = 7.5
     negative_prompt: str = ""  # Empty by default for diffusers compatibility
-
-    # Additional diffusers-specific parameters
-    eta: float = 0.0  # For DDIM scheduler
-    clip_skip: int | None = None  # CLIP skip for some models
 
     def __post_init__(self) -> None:
         # Set data type based on num_frames

@@ -55,6 +55,8 @@ class TestDiffusersGenericConfig:
         assert params.num_inference_steps == 30
         assert params.guidance_scale == 7.5
         assert params.negative_prompt == ""
+        # Check that diffusers-incompatible fields are not added
+        assert not hasattr(params, "clip_skip")
 
     def test_pipeline_config_defaults(self):
         """Test DiffusersGenericPipelineConfig default values."""
