@@ -93,7 +93,21 @@ class GPUWorker:
         assert self.pipeline is not None
         # TODO: dealing with first req for now
         req = batch[0]
-        output_batch = self.pipeline.forward(req, server_args)
+        result = self.pipeline.forward(req, server_args)
+
+        # Convert Req to OutputBatch if needed
+        if isinstance(result, Req):
+            output_batch = OutputBatch(
+                output=result.output,
+                trajectory_timesteps=result.trajectory_timesteps,
+                trajectory_latents=result.trajectory_latents,
+                trajectory_decoded=getattr(result, "trajectory_decoded", None),
+                logging_info=result.logging_info,
+            )
+        else:
+            # Assume it's already an OutputBatch
+            output_batch = result
+
         if req.perf_logger:
             logging_info = getattr(output_batch, "logging_info", None) or getattr(
                 req, "logging_info", None
