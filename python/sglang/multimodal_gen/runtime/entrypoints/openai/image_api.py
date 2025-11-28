@@ -53,6 +53,9 @@ def _build_sampling_params_from_request(
     output_format: Optional[str],
     background: Optional[str],
     image_path: Optional[str] = None,
+    num_inference_steps: Optional[int] = None,
+    guidance_scale: Optional[float] = None,
+    seed: Optional[int] = None,
 ) -> SamplingParams:
     width, height = _parse_size(size)
     ext = _choose_ext(output_format, background)
@@ -71,6 +74,14 @@ def _build_sampling_params_from_request(
         num_outputs_per_prompt=max(1, min(int(n or 1), 10)),
         save_output=True,
     )
+
+    # Override with explicit values if provided
+    if num_inference_steps is not None:
+        user_params.num_inference_steps = num_inference_steps
+    if guidance_scale is not None:
+        user_params.guidance_scale = guidance_scale
+    if seed is not None:
+        user_params.seed = seed
 
     # Let SamplingParams auto-generate a file name, then force desired extension
     sampling_params = sampling_params.from_user_sampling_params(user_params)
@@ -116,12 +127,18 @@ async def generations(
         size=request.size,
         output_format=request.output_format,
         background=request.background,
+        num_inference_steps=request.num_inference_steps,
+        guidance_scale=request.guidance_scale,
+        seed=request.seed,
     )
     batch = prepare_request(
         prompt=request.prompt,
         server_args=get_global_server_args(),
         sampling_params=sampling,
     )
+    # Add diffusers_kwargs if provided
+    if request.diffusers_kwargs:
+        batch.extra["diffusers_kwargs"] = request.diffusers_kwargs
     # Run synchronously for images and save to disk
     result = await scheduler_client.forward([batch])
     save_file_path = os.path.join(batch.output_path, batch.output_file_name)

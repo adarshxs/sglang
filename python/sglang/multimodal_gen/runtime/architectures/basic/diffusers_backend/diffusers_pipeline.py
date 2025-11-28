@@ -8,6 +8,7 @@ through sglang's infrastructure using vanilla diffusers pipelines.
 
 import argparse
 from typing import Any
+from PIL import Image
 
 import torch
 
@@ -253,6 +254,13 @@ class DiffusersExecutionStage(PipelineStage):
         # Image input for img2img or inpainting
         if batch.pil_image is not None:
             kwargs["image"] = batch.pil_image
+        elif batch.image_path is not None and batch.image_path:
+            try:
+                image = Image.open(batch.image_path).convert("RGB")
+                kwargs["image"] = image
+                logger.info("Loaded input image from %s, size: %s", batch.image_path, image.size)
+            except Exception as e:
+                logger.error("Failed to load image from %s: %s", batch.image_path, e)
 
         # Number of outputs
         if batch.num_outputs_per_prompt > 1:

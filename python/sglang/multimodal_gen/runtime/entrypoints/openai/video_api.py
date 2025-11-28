@@ -68,6 +68,14 @@ def _build_sampling_params_from_request(
         image_path=request.input_reference,
         save_output=True,
     )
+    # Override with explicit values if provided
+    if request.num_inference_steps is not None:
+        user_params.num_inference_steps = request.num_inference_steps
+    if request.guidance_scale is not None:
+        user_params.guidance_scale = request.guidance_scale
+    if request.seed is not None:
+        user_params.seed = request.seed
+
     sampling_params = sampling_params.from_user_sampling_params(user_params)
     sampling_params.set_output_file_name()
     sampling_params.log(server_args)
@@ -199,6 +207,9 @@ async def create_video(
         server_args=get_global_server_args(),
         sampling_params=sampling_params,
     )
+    # Add diffusers_kwargs if provided
+    if req.diffusers_kwargs:
+        batch.extra["diffusers_kwargs"] = req.diffusers_kwargs
     # Enqueue the job asynchronously and return immediately
     asyncio.create_task(_dispatch_job_async(request_id, batch))
     return VideoResponse(**job)
