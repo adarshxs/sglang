@@ -189,6 +189,16 @@ class DiffusersExecutionStage(PipelineStage):
             if output.shape[0] == 1:
                 output = output.repeat(3, 1, 1)  # Use repeat instead of expand for contiguous memory
 
+        # The downstream code expects output to be a list or iterable of samples
+        # where each sample is (C, H, W) for images or (C, T, H, W) for videos.
+        # When iterating over output_batch.output, it should yield complete samples.
+        # For a single image, we need to wrap it in a list-like structure.
+        # We'll add a batch dimension so output[0] gives the full image.
+        if output.dim() == 3:
+            # Add batch dimension: (C, H, W) -> (1, C, H, W)
+            # Then when code does `for sample in output`, sample will be (C, H, W)
+            output = output.unsqueeze(0)
+
         logger.info("Final output tensor shape: %s", output.shape)
         return output
 
