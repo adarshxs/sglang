@@ -183,6 +183,9 @@ class DiffusersExecutionStage(PipelineStage):
 
     def _postprocess_output(self, output: torch.Tensor) -> torch.Tensor:
         """Post-process output tensor to ensure valid values and correct shape."""
+        # Move to CPU and convert to float32 for downstream processing
+        output = output.cpu().float()
+
         # Handle NaN or Inf values
         has_invalid = torch.isnan(output).any() or torch.isinf(output).any()
         if has_invalid:
