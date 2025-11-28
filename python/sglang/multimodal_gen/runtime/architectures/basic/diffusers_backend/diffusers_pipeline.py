@@ -256,9 +256,18 @@ class DiffusersExecutionStage(PipelineStage):
             kwargs["image"] = batch.pil_image
         elif batch.image_path is not None and batch.image_path:
             try:
-                image = Image.open(batch.image_path).convert("RGB")
+                image_path = batch.image_path
+                # Handle URLs
+                if image_path.startswith(("http://", "https://")):
+                    import requests
+                    from io import BytesIO
+                    response = requests.get(image_path, timeout=30)
+                    response.raise_for_status()
+                    image = Image.open(BytesIO(response.content)).convert("RGB")
+                else:
+                    image = Image.open(image_path).convert("RGB")
                 kwargs["image"] = image
-                logger.info("Loaded input image from %s, size: %s", batch.image_path, image.size)
+                logger.info("Loaded input image from %s, size: %s", image_path, image.size)
             except Exception as e:
                 logger.error("Failed to load image from %s: %s", batch.image_path, e)
 
