@@ -13,7 +13,10 @@ import os
 import pkgutil
 import re
 from functools import lru_cache
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type, Union
+
+if TYPE_CHECKING:
+    from sglang.multimodal_gen.runtime.server_args import Backend
 
 from sglang.multimodal_gen.configs.pipelines import (
     FastHunyuanConfig,
@@ -222,8 +225,62 @@ class ModelInfo:
     pipeline_config_cls: Type[PipelineConfig]
 
 
-@lru_cache(maxsize=1)
-def get_model_info(model_path: str) -> Optional[ModelInfo]:
+def _get_diffusers_model_info(model_path: str) -> ModelInfo:
+    """
+    Get model info for diffusers backend.
+
+    Returns a ModelInfo with DiffusersPipeline and generic configs.
+    """
+    from sglang.multimodal_gen.configs.pipelines.diffusers_generic import (
+        DiffusersGenericPipelineConfig,
+    )
+    from sglang.multimodal_gen.configs.sample.diffusers_generic import (
+        DiffusersGenericSamplingParams,
+    )
+    from sglang.multimodal_gen.runtime.architectures.basic.diffusers_backend import (
+        DiffusersPipeline,
+    )
+
+    return ModelInfo(
+        pipeline_cls=DiffusersPipeline,
+        sampling_param_cls=DiffusersGenericSamplingParams,
+        pipeline_config_cls=DiffusersGenericPipelineConfig,
+    )
+
+
+def _has_native_support(model_path: str) -> bool:
+    """
+    Check if the model has native sglang support.
+
+    Returns True if the model's pipeline class is registered and config is available.
+    """
+    _discover_and_register_pipelines()
+
+    try:
+        if os.path.exists(model_path):
+            config = verify_model_config_and_directory(model_path)
+        else:
+            config = maybe_download_model_index(model_path)
+    except Exception:
+        return False
+
+    pipeline_class_name = config.get("_class_name")
+    if not pipeline_class_name:
+        return False
+
+    # Check if pipeline class is registered
+    if pipeline_class_name not in _PIPELINE_REGISTRY:
+        return False
+
+    # Check if config is available
+    config_info = _get_config_info(model_path)
+    return config_info is not None
+
+
+def get_model_info(
+    model_path: str,
+    backend: Optional[Union[str, "Backend"]] = None,
+) -> Optional[ModelInfo]:
     """
     Resolves all necessary classes (pipeline, sampling, config) for a given model path.
 
@@ -232,7 +289,31 @@ def get_model_info(model_path: str) -> Optional[ModelInfo]:
        '_class_name' against an auto-discovered registry of pipeline implementations.
     2. Resolves the associated configuration classes (for sampling and pipeline) using a
        manually registered mapping based on the model path.
+
+    Args:
+        model_path: Path to the model or HuggingFace model ID
+        backend: Backend to use ('auto', 'sglang', 'diffusers'). If None, uses 'auto'.
+
+    Returns:
+        ModelInfo with the resolved pipeline class and config classes, or None if not found.
     """
+    # Import Backend enum here to avoid circular imports
+    from sglang.multimodal_gen.runtime.server_args import Backend
+
+    # Normalize backend
+    if backend is None:
+        backend = Backend.AUTO
+    elif isinstance(backend, str):
+        backend = Backend.from_string(backend)
+
+    # Handle explicit diffusers backend
+    if backend == Backend.DIFFUSERS:
+        logger.info(
+            "Using diffusers backend for model '%s' (explicitly requested)", model_path
+        )
+        return _get_diffusers_model_info(model_path)
+
+    # For AUTO or SGLANG backend, try native implementation first
     # 1. Discover all available pipeline classes and cache them
     _discover_and_register_pipelines()
 
@@ -244,32 +325,55 @@ def get_model_info(model_path: str) -> Optional[ModelInfo]:
             config = maybe_download_model_index(model_path)
     except Exception as e:
         logger.error(f"Could not read model config for '{model_path}': {e}")
+        if backend == Backend.AUTO:
+            logger.info("Falling back to diffusers backend")
+            return _get_diffusers_model_info(model_path)
         return None
 
     pipeline_class_name = config.get("_class_name")
     if not pipeline_class_name:
         logger.error(f"'_class_name' not found in model_index.json for '{model_path}'")
+        if backend == Backend.AUTO:
+            logger.info("Falling back to diffusers backend")
+            return _get_diffusers_model_info(model_path)
         return None
 
     pipeline_cls = _PIPELINE_REGISTRY.get(pipeline_class_name)
     if not pipeline_cls:
-        logger.error(
-            f"Pipeline class '{pipeline_class_name}' specified in '{model_path}' is not a registered EntryClass in the framework. "
-            f"Available pipelines: {list(_PIPELINE_REGISTRY.keys())}"
-        )
-        return None
+        if backend == Backend.AUTO:
+            logger.warning(
+                f"Pipeline class '{pipeline_class_name}' specified in '{model_path}' has no native sglang support. "
+                f"Falling back to diffusers backend."
+            )
+            return _get_diffusers_model_info(model_path)
+        else:
+            logger.error(
+                f"Pipeline class '{pipeline_class_name}' specified in '{model_path}' is not a registered EntryClass in the framework. "
+                f"Available pipelines: {list(_PIPELINE_REGISTRY.keys())}. "
+                f"Consider using --backend diffusers to use vanilla diffusers pipeline."
+            )
+            return None
 
     # 3. Get configuration classes (sampling, pipeline config)
     config_info = _get_config_info(model_path)
     if not config_info:
-        logger.error(
-            f"Could not resolve configuration for model '{model_path}'. "
-            "It is not a registered model path or detected by any registered model family detectors. "
-            f"Known model paths: {list(_MODEL_PATH_TO_NAME.keys())}"
-        )
-        return None
+        if backend == Backend.AUTO:
+            logger.warning(
+                f"Could not resolve native configuration for model '{model_path}'. "
+                f"Falling back to diffusers backend."
+            )
+            return _get_diffusers_model_info(model_path)
+        else:
+            logger.error(
+                f"Could not resolve configuration for model '{model_path}'. "
+                "It is not a registered model path or detected by any registered model family detectors. "
+                f"Known model paths: {list(_MODEL_PATH_TO_NAME.keys())}. "
+                f"Consider using --backend diffusers to use vanilla diffusers pipeline."
+            )
+            return None
 
     # 4. Combine and return the complete model info
+    logger.info("Using native sglang backend for model '%s'", model_path)
     return ModelInfo(
         pipeline_cls=pipeline_cls,
         sampling_param_cls=config_info.sampling_param_cls,
