@@ -254,7 +254,7 @@ class DiffusersExecutionStage(PipelineStage):
 
     def _get_pipeline_device(self) -> str:
         """Get the device the pipeline is running on."""
-        for attr in ["unet", "transformer"]:
+        for attr in ["unet", "transformer", "vae"]:
             component = getattr(self.diffusers_pipe, attr, None)
             if component is not None:
                 try:
