@@ -126,8 +126,18 @@ def prepare_request(
 
     sampling_params = prepare_sampling_params(prompt, server_args, sampling_params)
 
+    # Get sampling params as dict, excluding fields not in Req
+    params_dict = shallow_asdict(sampling_params)
+
+    # Handle diffusers_kwargs - store in extra dict for diffusers backend
+    diffusers_kwargs = params_dict.pop("diffusers_kwargs", None)
+    extra = params_dict.get("extra", {})
+    if diffusers_kwargs:
+        extra["diffusers_kwargs"] = diffusers_kwargs
+        params_dict["extra"] = extra
+
     req = Req(
-        **shallow_asdict(sampling_params),
+        **params_dict,
         VSA_sparsity=server_args.VSA_sparsity,
     )
     # req.set_width_and_height(server_args)

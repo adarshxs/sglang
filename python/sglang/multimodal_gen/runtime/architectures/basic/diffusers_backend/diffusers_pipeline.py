@@ -217,7 +217,8 @@ class DiffusersExecutionStage(PipelineStage):
         if batch.num_inference_steps is not None:
             kwargs["num_inference_steps"] = batch.num_inference_steps
 
-        if batch.guidance_scale is not None and batch.guidance_scale > 0:
+        # Always pass guidance_scale (some models need 0.0 explicitly)
+        if batch.guidance_scale is not None:
             kwargs["guidance_scale"] = batch.guidance_scale
 
         # Dimensions
@@ -257,8 +258,13 @@ class DiffusersExecutionStage(PipelineStage):
         if batch.num_outputs_per_prompt > 1:
             kwargs["num_images_per_prompt"] = batch.num_outputs_per_prompt
 
-        # Don't specify output_type - let the pipeline use its default
-        # We'll handle whatever output format it returns
+        # Add any extra diffusers-specific kwargs from batch.extra
+        # This allows passing arbitrary parameters to the diffusers pipeline
+        if batch.extra:
+            diffusers_kwargs = batch.extra.get("diffusers_kwargs", {})
+            if diffusers_kwargs:
+                logger.info("Adding diffusers_kwargs: %s", diffusers_kwargs)
+                kwargs.update(diffusers_kwargs)
 
         return kwargs
 

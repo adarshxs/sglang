@@ -5,7 +5,8 @@ Generic sampling parameters for diffusers backend.
 This module provides generic sampling parameters that work with any diffusers pipeline.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from sglang.multimodal_gen.configs.sample.base import DataType, SamplingParams
 
@@ -18,9 +19,8 @@ class DiffusersGenericSamplingParams(SamplingParams):
     These parameters cover the most common options across different diffusers pipelines.
     The diffusers pipeline will use whichever parameters it supports.
 
-    Note: We don't add diffusers-specific fields here because they get passed
-    to Req which doesn't support them. Instead, use the `extra` dict in Req
-    for pipeline-specific parameters.
+    For pipeline-specific parameters, use `diffusers_kwargs` dict which will be
+    passed directly to the diffusers pipeline call.
     """
 
     # Override defaults with more conservative values that work across pipelines
@@ -30,6 +30,10 @@ class DiffusersGenericSamplingParams(SamplingParams):
     num_inference_steps: int = 30
     guidance_scale: float = 7.5
     negative_prompt: str = ""  # Empty by default for diffusers compatibility
+
+    # Extra kwargs to pass directly to the diffusers pipeline
+    # Example: {"output_type": "latent", "return_dict": False}
+    diffusers_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Set data type based on num_frames
