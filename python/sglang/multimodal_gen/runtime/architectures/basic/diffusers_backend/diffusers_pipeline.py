@@ -216,17 +216,28 @@ class DiffusersExecutionStage(PipelineStage):
 
         # Ensure correct tensor shape for downstream processing
         # Expected format: (C, H, W) for images or (C, T, H, W) for videos
-        # The downstream post_process_sample expects at least 3D
-        if output.dim() == 2:
-            # (H, W) -> (1, H, W) - grayscale image
-            output = output.unsqueeze(0)
+        # Downstream iterates over batch: output[i] should be (C, H, W) or (C, T, H, W)
+        
+        if output.dim() == 5:
+            # Video: (B, T, C, H, W) -> (B, C, T, H, W) for downstream
+            # Diffusers returns (B, T, C, H, W), sglang expects (B, C, T, H, W)
+            b, t, c, h, w = output.shape
+            output = output.permute(0, 2, 1, 3, 4)  # (B, C, T, H, W)
+            logger.debug("Permuted video from (B,T,C,H,W) to (B,C,T,H,W): %s", output.shape)
         elif output.dim() == 4:
-            # (B, C, H, W) -> (C, H, W) if batch size is 1
+            # Could be (B, C, H, W) for images or (T, C, H, W) for video
+            # Check if first dim looks like batch (small) or time (large)
             if output.shape[0] == 1:
-                output = output.squeeze(0)
-
-        # For images, ensure we have (C, H, W) format with C=3 for RGB
-        if output.dim() == 3:
+                # Single image batch: (1, C, H, W) - keep as is
+                pass
+            elif output.shape[1] in [1, 3, 4]:
+                # Likely (B, C, H, W) - image batch, keep as is
+                pass
+            else:
+                # Likely (T, C, H, W) - video frames, add batch dim
+                output = output.unsqueeze(0)  # (1, T, C, H, W)
+                output = output.permute(0, 2, 1, 3, 4)  # (1, C, T, H, W)
+        elif output.dim() == 3:
             c, h, w = output.shape
             # If channels are last (H, W, C), transpose
             if c > 4 and w <= 4:
@@ -234,17 +245,12 @@ class DiffusersExecutionStage(PipelineStage):
                 c, h, w = output.shape
             # If grayscale, expand to RGB
             if output.shape[0] == 1:
-                output = output.repeat(3, 1, 1)  # Use repeat instead of expand for contiguous memory
-
-        # The downstream code expects output to be a list or iterable of samples
-        # where each sample is (C, H, W) for images or (C, T, H, W) for videos.
-        # When iterating over output_batch.output, it should yield complete samples.
-        # For a single image, we need to wrap it in a list-like structure.
-        # We'll add a batch dimension so output[0] gives the full image.
-        if output.dim() == 3:
+                output = output.repeat(3, 1, 1)
             # Add batch dimension: (C, H, W) -> (1, C, H, W)
-            # Then when code does `for sample in output`, sample will be (C, H, W)
             output = output.unsqueeze(0)
+        elif output.dim() == 2:
+            # (H, W) -> (1, 3, H, W) - grayscale to RGB with batch
+            output = output.unsqueeze(0).repeat(3, 1, 1).unsqueeze(0)
 
         logger.info("Final output tensor shape: %s", output.shape)
         return output
