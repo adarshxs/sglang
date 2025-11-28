@@ -28,8 +28,8 @@ class DiffusersGenericPipelineConfig(PipelineConfig):
     # Default to T2I since it's the most common use case
     task_type: ModelTaskType = ModelTaskType.T2I
 
-    # Precision settings - diffusers will use these
-    dit_precision: str = "fp16"
+    # Precision settings - use bfloat16 by default for better compatibility with newer models
+    dit_precision: str = "bf16"
     vae_precision: str = "fp32"
 
     # Disable sglang-specific features that don't apply to diffusers backend

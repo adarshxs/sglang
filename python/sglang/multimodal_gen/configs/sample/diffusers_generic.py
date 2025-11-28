@@ -25,8 +25,8 @@ class DiffusersGenericSamplingParams(SamplingParams):
 
     # Override defaults with more conservative values that work across pipelines
     num_frames: int = 1  # Default to image generation
-    height: int = 512
-    width: int = 512
+    height: int = 1024  # Modern models often need 1024x1024
+    width: int = 1024
     num_inference_steps: int = 30
     guidance_scale: float = 7.5
     negative_prompt: str = ""  # Empty by default for diffusers compatibility
