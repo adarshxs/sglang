@@ -9,6 +9,9 @@ through sglang's infrastructure using vanilla diffusers pipelines.
 import argparse
 from io import BytesIO
 from typing import Any
+import warnings
+
+from diffusers import DiffusionPipeline
 
 import numpy as np
 import requests
@@ -46,7 +49,6 @@ class DiffusersExecutionStage(PipelineStage):
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         """Execute the diffusers pipeline."""
-        import warnings
 
         kwargs = self._build_pipeline_kwargs(batch, server_args)
 
@@ -318,7 +320,6 @@ class DiffusersPipeline(ComposedPipelineBase):
         self, model_path: str, server_args: ServerArgs
     ) -> Any:
         """Load the diffusers pipeline."""
-        from diffusers import DiffusionPipeline
 
         model_path = maybe_download_model(model_path)
         self.model_path = model_path
