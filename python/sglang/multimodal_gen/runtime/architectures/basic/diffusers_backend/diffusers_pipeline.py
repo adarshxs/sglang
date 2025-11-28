@@ -65,7 +65,8 @@ class DiffusersExecutionStage(PipelineStage):
                     import torchvision.transforms as T
 
                     transform = T.ToTensor()
-                    batch.output = torch.stack([transform(img) for img in images])
+                    tensors = [transform(img) for img in images]
+                    batch.output = torch.stack(tensors) if len(tensors) > 1 else tensors[0]
                 else:
                     batch.output = torch.stack(images) if len(images) > 1 else images[0]
             else:
@@ -74,8 +75,17 @@ class DiffusersExecutionStage(PipelineStage):
             # Video pipelines
             frames = output.frames
             if isinstance(frames, list):
-                # Handle list of frame tensors
-                batch.output = torch.stack(frames) if len(frames) > 1 else frames[0]
+                # Handle list of frame tensors or PIL images
+                if len(frames) > 0:
+                    if hasattr(frames[0], "mode"):  # PIL Image
+                        import torchvision.transforms as T
+                        transform = T.ToTensor()
+                        tensors = [transform(img) for img in frames]
+                        batch.output = torch.stack(tensors)
+                    else:
+                        batch.output = torch.stack(frames) if len(frames) > 1 else frames[0]
+                else:
+                    batch.output = None
             else:
                 batch.output = frames
         else:
@@ -88,6 +98,24 @@ class DiffusersExecutionStage(PipelineStage):
                 # Last resort - assume output is the result directly
                 batch.output = output
 
+        # Ensure output tensor is in valid range and handle NaN/Inf
+        if batch.output is not None and isinstance(batch.output, torch.Tensor):
+            # Check for NaN or Inf values
+            if torch.isnan(batch.output).any() or torch.isinf(batch.output).any():
+                logger.warning(
+                    "Output contains NaN or Inf values. Clamping to valid range."
+                )
+                batch.output = torch.nan_to_num(batch.output, nan=0.0, posinf=1.0, neginf=0.0)
+
+            # Ensure values are in [0, 1] range for image outputs
+            if batch.output.min() < 0 or batch.output.max() > 1:
+                # Some models output in [-1, 1] range, normalize to [0, 1]
+                if batch.output.min() >= -1 and batch.output.max() <= 1:
+                    batch.output = (batch.output + 1) / 2
+                else:
+                    # Clamp to valid range
+                    batch.output = batch.output.clamp(0, 1)
+
         return batch
 
     def _build_pipeline_kwargs(self, batch: Req, server_args: ServerArgs) -> dict:
@@ -98,7 +126,7 @@ class DiffusersExecutionStage(PipelineStage):
         if batch.prompt is not None:
             kwargs["prompt"] = batch.prompt
 
-        if batch.negative_prompt is not None:
+        if batch.negative_prompt is not None and batch.negative_prompt:
             kwargs["negative_prompt"] = batch.negative_prompt
 
         # Generation params
@@ -123,13 +151,18 @@ class DiffusersExecutionStage(PipelineStage):
         if batch.generator is not None:
             kwargs["generator"] = batch.generator
         elif batch.seed is not None:
-            device = next(self.diffusers_pipe.unet.parameters()).device if hasattr(
-                self.diffusers_pipe, "unet"
-            ) else (
-                next(self.diffusers_pipe.transformer.parameters()).device
-                if hasattr(self.diffusers_pipe, "transformer")
-                else "cuda"
-            )
+            # Determine device for generator
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            if hasattr(self.diffusers_pipe, "unet") and self.diffusers_pipe.unet is not None:
+                try:
+                    device = next(self.diffusers_pipe.unet.parameters()).device
+                except StopIteration:
+                    pass
+            elif hasattr(self.diffusers_pipe, "transformer") and self.diffusers_pipe.transformer is not None:
+                try:
+                    device = next(self.diffusers_pipe.transformer.parameters()).device
+                except StopIteration:
+                    pass
             kwargs["generator"] = torch.Generator(device=device).manual_seed(batch.seed)
 
         # Image input for img2img or inpainting
@@ -139,6 +172,9 @@ class DiffusersExecutionStage(PipelineStage):
         # Number of outputs
         if batch.num_outputs_per_prompt > 1:
             kwargs["num_images_per_prompt"] = batch.num_outputs_per_prompt
+
+        # Request PIL output for easier handling
+        kwargs["output_type"] = "pil"
 
         return kwargs
 
@@ -203,25 +239,39 @@ class DiffusersPipeline(ComposedPipelineBase):
         model_path = maybe_download_model(model_path)
         self.model_path = model_path
 
-        # Determine dtype
-        dtype = torch.float16
+        # Determine dtype - try bfloat16 first for better compatibility with newer models
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         if hasattr(server_args, "pipeline_config") and server_args.pipeline_config:
             dit_precision = getattr(
-                server_args.pipeline_config, "dit_precision", "fp16"
+                server_args.pipeline_config, "dit_precision", None
             )
-            if dit_precision == "bf16":
+            if dit_precision == "fp16":
+                dtype = torch.float16
+            elif dit_precision == "bf16":
                 dtype = torch.bfloat16
             elif dit_precision == "fp32":
                 dtype = torch.float32
 
         # Load the pipeline
         logger.info("Loading diffusers pipeline with dtype=%s", dtype)
-        pipe = DiffusionPipeline.from_pretrained(
-            model_path,
-            torch_dtype=dtype,
-            trust_remote_code=server_args.trust_remote_code,
-            revision=server_args.revision,
-        )
+        try:
+            pipe = DiffusionPipeline.from_pretrained(
+                model_path,
+                torch_dtype=dtype,
+                trust_remote_code=server_args.trust_remote_code,
+                revision=server_args.revision,
+            )
+        except Exception as e:
+            # Fallback to float32 if there's an issue with the dtype
+            logger.warning(
+                "Failed to load with dtype=%s, falling back to float32: %s", dtype, e
+            )
+            pipe = DiffusionPipeline.from_pretrained(
+                model_path,
+                torch_dtype=torch.float32,
+                trust_remote_code=server_args.trust_remote_code,
+                revision=server_args.revision,
+            )
 
         # Move to appropriate device
         if torch.cuda.is_available():
