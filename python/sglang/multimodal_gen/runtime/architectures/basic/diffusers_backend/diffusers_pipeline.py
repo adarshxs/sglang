@@ -43,6 +43,8 @@ class DiffusersExecutionStage(PipelineStage):
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         """Execute the diffusers pipeline."""
+        import warnings
+
         # Build kwargs from batch
         kwargs = self._build_pipeline_kwargs(batch, server_args)
 
@@ -51,72 +53,99 @@ class DiffusersExecutionStage(PipelineStage):
             {k: type(v).__name__ for k, v in kwargs.items()},
         )
 
-        # Execute the diffusers pipeline
-        with torch.no_grad():
+        # Execute the diffusers pipeline, catching warnings
+        with torch.no_grad(), warnings.catch_warnings(record=True) as caught_warnings:
+            warnings.simplefilter("always")
             output = self.diffusers_pipe(**kwargs)
 
-        # Extract outputs - diffusers pipelines return different output types
-        if hasattr(output, "images"):
-            # Image pipelines (StableDiffusion, FLUX, etc.)
-            images = output.images
-            if isinstance(images, list):
-                # Convert PIL images to tensors if needed
-                if hasattr(images[0], "mode"):  # PIL Image
-                    import torchvision.transforms as T
+            # Check if there were NaN warnings during generation
+            nan_warning = any("invalid value" in str(w.message) for w in caught_warnings)
+            if nan_warning:
+                logger.warning("NaN values detected during pipeline execution")
 
-                    transform = T.ToTensor()
-                    tensors = [transform(img) for img in images]
-                    batch.output = torch.stack(tensors) if len(tensors) > 1 else tensors[0]
-                else:
-                    batch.output = torch.stack(images) if len(images) > 1 else images[0]
-            else:
-                batch.output = images
-        elif hasattr(output, "frames"):
-            # Video pipelines
-            frames = output.frames
-            if isinstance(frames, list):
-                # Handle list of frame tensors or PIL images
-                if len(frames) > 0:
-                    if hasattr(frames[0], "mode"):  # PIL Image
-                        import torchvision.transforms as T
-                        transform = T.ToTensor()
-                        tensors = [transform(img) for img in frames]
-                        batch.output = torch.stack(tensors)
-                    else:
-                        batch.output = torch.stack(frames) if len(frames) > 1 else frames[0]
-                else:
-                    batch.output = None
-            else:
-                batch.output = frames
-        else:
-            # Fallback - try to get the first attribute that looks like output
-            for attr in ["sample", "pred_original_sample", "latents"]:
-                if hasattr(output, attr):
-                    batch.output = getattr(output, attr)
-                    break
-            else:
-                # Last resort - assume output is the result directly
-                batch.output = output
+        # Extract output
+        batch.output = self._extract_output(output)
 
-        # Ensure output tensor is in valid range and handle NaN/Inf
-        if batch.output is not None and isinstance(batch.output, torch.Tensor):
-            # Check for NaN or Inf values
-            if torch.isnan(batch.output).any() or torch.isinf(batch.output).any():
-                logger.warning(
-                    "Output contains NaN or Inf values. Clamping to valid range."
-                )
-                batch.output = torch.nan_to_num(batch.output, nan=0.0, posinf=1.0, neginf=0.0)
-
-            # Ensure values are in [0, 1] range for image outputs
-            if batch.output.min() < 0 or batch.output.max() > 1:
-                # Some models output in [-1, 1] range, normalize to [0, 1]
-                if batch.output.min() >= -1 and batch.output.max() <= 1:
-                    batch.output = (batch.output + 1) / 2
-                else:
-                    # Clamp to valid range
-                    batch.output = batch.output.clamp(0, 1)
+        # Post-process output
+        if batch.output is not None:
+            batch.output = self._postprocess_output(batch.output)
 
         return batch
+
+    def _extract_output(self, output: Any) -> torch.Tensor | None:
+        """Extract tensor output from pipeline result."""
+        import torchvision.transforms as T
+
+        result = None
+
+        # Try to get images
+        if hasattr(output, "images"):
+            images = output.images
+            if isinstance(images, list) and len(images) > 0:
+                if hasattr(images[0], "mode"):  # PIL Image
+                    transform = T.ToTensor()
+                    tensors = [transform(img) for img in images]
+                    result = torch.stack(tensors) if len(tensors) > 1 else tensors[0]
+                elif isinstance(images[0], torch.Tensor):
+                    result = torch.stack(images) if len(images) > 1 else images[0]
+            elif isinstance(images, torch.Tensor):
+                result = images
+
+        # Try to get frames (video)
+        elif hasattr(output, "frames"):
+            frames = output.frames
+            if isinstance(frames, list) and len(frames) > 0:
+                if hasattr(frames[0], "mode"):  # PIL Image
+                    transform = T.ToTensor()
+                    tensors = [transform(img) for img in frames]
+                    result = torch.stack(tensors)
+                elif isinstance(frames[0], torch.Tensor):
+                    result = torch.stack(frames) if len(frames) > 1 else frames[0]
+            elif isinstance(frames, torch.Tensor):
+                result = frames
+
+        # Fallback to other attributes
+        if result is None:
+            for attr in ["sample", "pred_original_sample"]:
+                if hasattr(output, attr):
+                    val = getattr(output, attr)
+                    if isinstance(val, torch.Tensor):
+                        result = val
+                        break
+
+        return result
+
+    def _postprocess_output(self, output: torch.Tensor) -> torch.Tensor:
+        """Post-process output tensor to ensure valid values."""
+        # Handle NaN or Inf values
+        has_invalid = torch.isnan(output).any() or torch.isinf(output).any()
+        if has_invalid:
+            logger.warning("Output contains NaN or Inf values. Fixing...")
+
+            # Count invalid pixels
+            nan_count = torch.isnan(output).sum().item()
+            inf_count = torch.isinf(output).sum().item()
+            total = output.numel()
+            logger.warning(
+                "Invalid values: %d NaN (%.1f%%), %d Inf (%.1f%%)",
+                nan_count, 100 * nan_count / total,
+                inf_count, 100 * inf_count / total,
+            )
+
+            # Replace with neutral gray value
+            output = torch.nan_to_num(output, nan=0.5, posinf=1.0, neginf=0.0)
+
+        # Normalize to [0, 1] range
+        min_val, max_val = output.min().item(), output.max().item()
+
+        if min_val < -0.5 or max_val > 1.5:
+            # Likely in [-1, 1] range, normalize
+            output = (output + 1) / 2
+
+        # Clamp to valid range
+        output = output.clamp(0, 1)
+
+        return output
 
     def _build_pipeline_kwargs(self, batch: Req, server_args: ServerArgs) -> dict:
         """Build kwargs dict for diffusers pipeline call."""
@@ -173,8 +202,8 @@ class DiffusersExecutionStage(PipelineStage):
         if batch.num_outputs_per_prompt > 1:
             kwargs["num_images_per_prompt"] = batch.num_outputs_per_prompt
 
-        # Request PIL output for easier handling
-        kwargs["output_type"] = "pil"
+        # Don't specify output_type - let the pipeline use its default
+        # We'll handle whatever output format it returns
 
         return kwargs
 
