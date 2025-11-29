@@ -325,26 +325,43 @@ def apply_sglang_attention(
         return
 
     for name, model in models:
-        try:
-            # Use diffusers' native API
-            if hasattr(model, "set_attention_backend"):
-                model.set_attention_backend(diffusers_backend)
-                logger.info(
-                    "Set attention backend '%s' on %s via diffusers API",
-                    diffusers_backend,
-                    name,
-                )
-            else:
-                logger.info(
-                    "%s does not support set_attention_backend (diffusers version may be old)",
-                    name,
-                )
-        except Exception as e:
-            logger.warning(
-                "Could not set attention backend '%s' on %s: %s",
-                diffusers_backend,
+        if not hasattr(model, "set_attention_backend"):
+            logger.info(
+                "%s does not support set_attention_backend (diffusers version may be old)",
                 name,
-                e,
+            )
+            continue
+
+        # Try backends in order of preference with fallback
+        backends_to_try = [diffusers_backend]
+        
+        # Add fallbacks based on requested backend
+        if diffusers_backend in ("sglang_fa", "flash", "_flash_3"):
+            backends_to_try.extend(["_flash_3", "flash", "native"])
+        elif diffusers_backend in ("sglang_sage", "sage"):
+            backends_to_try.extend(["sage", "native"])
+        elif diffusers_backend not in ("native",):
+            backends_to_try.append("native")
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        backends_to_try = [b for b in backends_to_try if not (b in seen or seen.add(b))]
+        
+        success = False
+        for backend in backends_to_try:
+            try:
+                model.set_attention_backend(backend)
+                logger.info("Set attention backend '%s' on %s", backend, name)
+                success = True
+                break
+            except Exception as e:
+                logger.debug("Backend '%s' failed on %s: %s", backend, name, e)
+                continue
+        
+        if not success:
+            logger.warning(
+                "Could not set any attention backend on %s, using model default",
+                name,
             )
 
 
