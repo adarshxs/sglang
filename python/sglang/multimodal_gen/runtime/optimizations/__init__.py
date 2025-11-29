@@ -21,7 +21,11 @@ from sglang.multimodal_gen.runtime.optimizations.data_parallel import (
 from sglang.multimodal_gen.runtime.optimizations.diffusers_attention import (
     apply_sglang_attention,
     get_available_attention_backends,
+    register_sglang_backends_with_diffusers,
     reset_attention_backend,
+    sglang_flash_attention,
+    sglang_sage_attention,
+    sglang_sdpa_attention,
 )
 
 __all__ = [
@@ -29,6 +33,11 @@ __all__ = [
     "apply_sglang_attention",
     "get_available_attention_backends",
     "reset_attention_backend",
+    # SGLang attention functions (raw, no parallelism)
+    "register_sglang_backends_with_diffusers",
+    "sglang_flash_attention",
+    "sglang_sage_attention",
+    "sglang_sdpa_attention",
     # Data parallelism
     "DataParallelWrapper",
     "apply_data_parallel",
