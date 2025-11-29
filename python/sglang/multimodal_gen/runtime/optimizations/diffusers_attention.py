@@ -283,24 +283,26 @@ def apply_sglang_attention(
     # Map to diffusers/sglang backend name
     diffusers_backend = _BACKEND_NAME_MAP.get(backend, backend)
 
-    # If using SGLang-specific backend, try to register it with diffusers
-    # Note: This often doesn't work due to diffusers' internal validation
+    # If using SGLang-specific backend, register it with diffusers
     if diffusers_backend.startswith("sglang_"):
         registered = register_sglang_backends_with_diffusers()
-        # Always fall back to equivalent diffusers backend since custom
-        # registration rarely works with diffusers' strict validation
-        fallback = {
-            "sglang_fa": "flash",
-            "sglang_sage": "sage", 
-            "sglang_sdpa": "native",
-        }
-        original = diffusers_backend
-        diffusers_backend = fallback.get(diffusers_backend, "native")
-        logger.info(
-            "Using diffusers backend '%s' (equivalent to %s)",
-            diffusers_backend,
-            original,
-        )
+        if registered:
+            # Keep using the sglang_ backend name since registration succeeded
+            logger.info("Using registered SGLang backend: %s", diffusers_backend)
+        else:
+            # Fall back to equivalent diffusers backend only if registration failed
+            fallback = {
+                "sglang_fa": "flash",
+                "sglang_sage": "sage", 
+                "sglang_sdpa": "native",
+            }
+            original = diffusers_backend
+            diffusers_backend = fallback.get(diffusers_backend, "native")
+            logger.info(
+                "SGLang registration failed, using diffusers backend '%s' (for %s)",
+                diffusers_backend,
+                original,
+            )
 
     # Handle auto selection
     if diffusers_backend == "auto":
