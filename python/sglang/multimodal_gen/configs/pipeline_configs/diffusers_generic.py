@@ -82,25 +82,27 @@ class DiffusersGenericPipelineConfig(PipelineConfig):
         Override to skip most validation since diffusers handles its own config.
         Validate SGLang-specific optimization settings.
         """
-        # Validate attention backend (accept both CLI and internal names)
+        # Validate attention backend (accept CLI, diffusers, and SGLang names)
         valid_backends = {
-            # CLI names
+            # Auto
             "auto",
-            "fa",
-            "fa3",
-            "fa4",
+            # SGLang CLI names
+            "fa", "fa3", "fa4",
+            "sage_attn", "sage_attn_three",
             "torch_sdpa",
-            "sage_attn",
-            "sage_attn_three",
-            # Internal names
-            "flash_attn",
-            "sdpa",
-            "sage_attn_3",
+            # Diffusers backend names
+            "flash", "_flash_3", "_flash_3_hub",
+            "sage", "sage_hub",
+            "native", "xformers", "flex",
+            # SGLang direct backends
+            "sglang_fa", "sglang_sage", "sglang_sdpa",
+            # Aliases
+            "flash_attn", "sdpa",
         }
         if self.attention_backend not in valid_backends:
             raise ValueError(
                 f"Invalid attention_backend '{self.attention_backend}'. "
-                f"Must be one of: {valid_backends}"
+                f"Must be one of: {sorted(valid_backends)}"
             )
 
         # Warn if conflicting CPU offload settings
