@@ -459,14 +459,23 @@ class DiffusersPipeline(ComposedPipelineBase):
         return pipe
 
     def _apply_torch_compile(self, pipe: Any) -> Any:
-        """Apply torch.compile to transformer/unet components."""
+        """Apply torch.compile to transformer/unet components.
+
+        Uses mode="reduce-overhead" instead of "max-autotune" because
+        max-autotune enables CUDA graphs which can conflict with models
+        that reuse tensors (e.g., video models like Wan, CogVideoX).
+        """
         compiled_components = []
+
+        # Use reduce-overhead mode - provides speedup without CUDA graph issues
+        # max-autotune causes "CUDAGraphs tensor overwritten" errors on video models
+        compile_mode = "reduce-overhead"
 
         # Compile transformer (for DiT-based models like FLUX, SD3, etc.)
         if hasattr(pipe, "transformer") and pipe.transformer is not None:
             try:
                 pipe.transformer = torch.compile(
-                    pipe.transformer, mode="max-autotune", fullgraph=False
+                    pipe.transformer, mode=compile_mode, fullgraph=False
                 )
                 compiled_components.append("transformer")
             except Exception as e:
@@ -476,7 +485,7 @@ class DiffusersPipeline(ComposedPipelineBase):
         if hasattr(pipe, "unet") and pipe.unet is not None:
             try:
                 pipe.unet = torch.compile(
-                    pipe.unet, mode="max-autotune", fullgraph=False
+                    pipe.unet, mode=compile_mode, fullgraph=False
                 )
                 compiled_components.append("unet")
             except Exception as e:
@@ -484,7 +493,9 @@ class DiffusersPipeline(ComposedPipelineBase):
 
         if compiled_components:
             logger.info(
-                "torch.compile enabled for: %s", ", ".join(compiled_components)
+                "torch.compile (mode=%s) enabled for: %s",
+                compile_mode,
+                ", ".join(compiled_components),
             )
         else:
             logger.warning(
