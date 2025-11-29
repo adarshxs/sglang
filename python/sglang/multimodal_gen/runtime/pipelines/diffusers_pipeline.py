@@ -543,22 +543,33 @@ class DiffusersPipeline(ComposedPipelineBase):
 
         This replaces diffusers' default attention with SGLang's optimized backends.
 
+        The attention backend is applied if:
+        1. --attention-backend is specified via CLI, OR
+        2. use_sglang_attention=True in pipeline_config
+
         Args:
             pipe: The diffusers pipeline
             server_args: Server arguments containing attention backend config
         """
         pipeline_config = getattr(server_args, "pipeline_config", None)
-        if not pipeline_config:
+
+        # Determine if we should apply SGLang attention
+        # CLI --attention-backend takes precedence and implicitly enables it
+        cli_backend = server_args.attention_backend
+        config_enabled = pipeline_config and getattr(
+            pipeline_config, "use_sglang_attention", False
+        )
+
+        if not cli_backend and not config_enabled:
             return
 
-        # Check if attention backend replacement is enabled
-        if not getattr(pipeline_config, "use_sglang_attention", False):
-            return
-
-        # Get backend from server_args or pipeline_config
-        backend = server_args.attention_backend
-        if backend is None:
+        # Get backend: CLI > pipeline_config > "auto"
+        if cli_backend:
+            backend = cli_backend
+        elif pipeline_config:
             backend = getattr(pipeline_config, "attention_backend", "auto")
+        else:
+            backend = "auto"
 
         try:
             from sglang.multimodal_gen.runtime.optimizations.diffusers_attention import (

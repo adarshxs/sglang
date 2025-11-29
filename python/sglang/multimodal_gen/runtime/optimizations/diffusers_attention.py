@@ -24,6 +24,21 @@ _DIFFUSERS_COMPATIBLE_BACKENDS = {
     AttentionBackendEnum.TORCH_SDPA,
 }
 
+# Map CLI backend names to internal names
+_BACKEND_NAME_MAP = {
+    # CLI names -> internal names
+    "fa": "flash_attn",
+    "fa3": "flash_attn",
+    "fa4": "flash_attn",
+    "flash_attn": "flash_attn",
+    "torch_sdpa": "sdpa",
+    "sdpa": "sdpa",
+    "sage_attn": "sage_attn",
+    "sage_attn_three": "sage_attn_3",
+    "sage_attn_3": "sage_attn_3",
+    "auto": "auto",
+}
+
 
 def get_available_attention_backends() -> list[str]:
     """Get list of available attention backends for diffusers.
@@ -72,7 +87,7 @@ class SGLangAttnProcessor:
     implementations (FlashAttention, SageAttention, or SDPA).
 
     Usage:
-        pipe.unet.set_attn_processor(SGLangAttnProcessor(backend="flash_attn"))
+        pipe.unet.set_attn_processor(SGLangAttnProcessor(backend="fa"))
     """
 
     def __init__(
@@ -85,14 +100,18 @@ class SGLangAttnProcessor:
 
         Args:
             backend: Attention backend to use. Options:
+                CLI names (from --attention-backend):
+                - "fa", "fa3", "fa4": FlashAttention
+                - "torch_sdpa": PyTorch SDPA
+                - "sage_attn": SageAttention
+                - "sage_attn_three": SageAttention 3 (FP8)
                 - "auto": Automatically select best available
-                - "flash_attn": Use FlashAttention
-                - "sage_attn": Use SageAttention
-                - "sage_attn_3": Use SageAttention 3 (FP8)
-                - "sdpa": Use PyTorch's scaled_dot_product_attention
+                Internal names also accepted:
+                - "flash_attn", "sdpa", "sage_attn_3"
             softmax_scale: Optional scale for softmax. If None, uses 1/sqrt(head_dim).
         """
-        self.backend_name = backend
+        # Normalize backend name (CLI names -> internal names)
+        self.backend_name = _BACKEND_NAME_MAP.get(backend, backend)
         self.softmax_scale = softmax_scale
         self._attn_fn: Callable | None = None
         self._backend_initialized = False
