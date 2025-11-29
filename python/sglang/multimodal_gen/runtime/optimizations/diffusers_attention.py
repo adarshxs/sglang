@@ -202,6 +202,7 @@ class SGLangAttnProcessor:
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
+        *args,  # Accept any extra positional args (e.g., rotary_emb)
         **kwargs,
     ) -> torch.Tensor:
         """Core attention computation with SGLang backend."""
@@ -318,6 +319,8 @@ class SGLangAttnProcessor:
         attn: Any,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        *args,  # Accept any extra positional args
         **kwargs,
     ) -> torch.Tensor:
         """Fallback to standard SDPA when SGLang backend fails."""
