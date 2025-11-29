@@ -179,8 +179,9 @@ def register_sglang_backends_with_diffusers() -> bool:
     """
     Register SGLang attention backends with diffusers' attention dispatcher.
     
-    This allows using SGLang's attention implementations via diffusers'
-    set_attention_backend() API.
+    Note: This may not work with all diffusers versions as the registry
+    has internal validation. If registration fails, use diffusers' built-in
+    backends (flash, sage, native) instead.
     
     Returns:
         True if registration succeeded, False otherwise.
@@ -188,20 +189,32 @@ def register_sglang_backends_with_diffusers() -> bool:
     try:
         from diffusers.models.attention_dispatch import _AttentionBackendRegistry
         
-        # Register each SGLang backend
+        # Try to register each SGLang backend
+        registered = []
         for name, fn in SGLANG_ATTENTION_FUNCTIONS.items():
-            if name not in _AttentionBackendRegistry._backends:
-                _AttentionBackendRegistry._backends[name] = fn
-                logger.debug("Registered SGLang backend '%s' with diffusers", name)
+            try:
+                if hasattr(_AttentionBackendRegistry, "_backends"):
+                    if name not in _AttentionBackendRegistry._backends:
+                        _AttentionBackendRegistry._backends[name] = fn
+                        registered.append(name)
+                elif hasattr(_AttentionBackendRegistry, "register"):
+                    _AttentionBackendRegistry.register(name, fn)
+                    registered.append(name)
+            except Exception as e:
+                logger.debug("Could not register '%s': %s", name, e)
         
-        logger.info("SGLang attention backends registered with diffusers dispatcher")
-        return True
+        if registered:
+            logger.info("Registered SGLang backends: %s", ", ".join(registered))
+            return True
+        else:
+            logger.debug("No SGLang backends were registered (diffusers may validate backends)")
+            return False
         
     except ImportError:
-        logger.debug("diffusers attention dispatcher not available (older version?)")
+        logger.debug("diffusers attention dispatcher not available")
         return False
     except Exception as e:
-        logger.warning("Failed to register SGLang backends with diffusers: %s", e)
+        logger.debug("Failed to register SGLang backends: %s", e)
         return False
 
 # Backends to try in order of preference for "auto"
@@ -271,20 +284,23 @@ def apply_sglang_attention(
     diffusers_backend = _BACKEND_NAME_MAP.get(backend, backend)
 
     # If using SGLang-specific backend, try to register it with diffusers
+    # Note: This often doesn't work due to diffusers' internal validation
     if diffusers_backend.startswith("sglang_"):
         registered = register_sglang_backends_with_diffusers()
-        if not registered:
-            logger.warning(
-                "Could not register SGLang backends with diffusers. "
-                "Falling back to equivalent diffusers backend."
-            )
-            # Fallback mapping
-            fallback = {
-                "sglang_fa": "flash",
-                "sglang_sage": "sage",
-                "sglang_sdpa": "native",
-            }
-            diffusers_backend = fallback.get(diffusers_backend, "native")
+        # Always fall back to equivalent diffusers backend since custom
+        # registration rarely works with diffusers' strict validation
+        fallback = {
+            "sglang_fa": "flash",
+            "sglang_sage": "sage", 
+            "sglang_sdpa": "native",
+        }
+        original = diffusers_backend
+        diffusers_backend = fallback.get(diffusers_backend, "native")
+        logger.info(
+            "Using diffusers backend '%s' (equivalent to %s)",
+            diffusers_backend,
+            original,
+        )
 
     # Handle auto selection
     if diffusers_backend == "auto":

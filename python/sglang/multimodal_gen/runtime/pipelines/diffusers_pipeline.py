@@ -461,15 +461,15 @@ class DiffusersPipeline(ComposedPipelineBase):
     def _apply_torch_compile(self, pipe: Any) -> Any:
         """Apply torch.compile to transformer/unet components.
 
-        Uses mode="reduce-overhead" instead of "max-autotune" because
-        max-autotune enables CUDA graphs which can conflict with models
-        that reuse tensors (e.g., video models like Wan, CogVideoX).
+        Uses mode="default" to avoid CUDA graph issues with video models.
+        CUDA graphs (used in reduce-overhead/max-autotune) conflict with
+        models that reuse tensors like Wan, CogVideoX, HunyuanVideo.
         """
         compiled_components = []
 
-        # Use reduce-overhead mode - provides speedup without CUDA graph issues
-        # max-autotune causes "CUDAGraphs tensor overwritten" errors on video models
-        compile_mode = "reduce-overhead"
+        # Use "default" mode - no CUDA graphs, avoids tensor overwrite errors
+        # reduce-overhead and max-autotune both use CUDA graphs which fail on video models
+        compile_mode = "default"
 
         # Compile transformer (for DiT-based models like FLUX, SD3, etc.)
         if hasattr(pipe, "transformer") and pipe.transformer is not None:
