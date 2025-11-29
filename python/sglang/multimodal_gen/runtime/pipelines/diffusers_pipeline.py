@@ -383,7 +383,191 @@ class DiffusersPipeline(ComposedPipelineBase):
             pipe = pipe.to("mps")
 
         logger.info("Loaded diffusers pipeline: %s", pipe.__class__.__name__)
+
+        # Apply SGLang optimizations
+        pipe = self._apply_optimizations(pipe, server_args)
+
         return pipe
+
+    def _apply_optimizations(self, pipe: Any, server_args: ServerArgs) -> Any:
+        """Apply SGLang optimizations to the diffusers pipeline.
+
+        Optimizations applied:
+        1. torch.compile for transformer/unet (if enabled)
+        2. VAE tiling for high-resolution outputs
+        3. VAE slicing for batch processing
+        4. Attention slicing for memory efficiency
+        5. CPU offloading for memory-constrained systems
+        """
+        pipeline_config = getattr(server_args, "pipeline_config", None)
+
+        # 1. torch.compile optimization
+        if server_args.enable_torch_compile:
+            pipe = self._apply_torch_compile(pipe)
+
+        # 2. VAE optimizations
+        if pipeline_config and getattr(pipeline_config, "vae_tiling", False):
+            self._enable_vae_tiling(pipe)
+
+        if pipeline_config and getattr(pipeline_config, "vae_slicing", False):
+            self._enable_vae_slicing(pipe)
+
+        # 3. Attention slicing for memory efficiency
+        if pipeline_config and getattr(pipeline_config, "attention_slicing", False):
+            self._enable_attention_slicing(pipe)
+
+        # 4. CPU offloading
+        if pipeline_config and getattr(pipeline_config, "enable_model_cpu_offload", False):
+            self._enable_cpu_offload(pipe, sequential=False)
+        elif pipeline_config and getattr(
+            pipeline_config, "enable_sequential_cpu_offload", False
+        ):
+            self._enable_cpu_offload(pipe, sequential=True)
+
+        # 5. SGLang attention backend replacement
+        self._apply_attention_backend(pipe, server_args)
+
+        # 6. Data parallelism
+        if pipeline_config and getattr(pipeline_config, "enable_data_parallel", False):
+            pipe = self._apply_data_parallel(
+                pipe, getattr(pipeline_config, "dp_devices", None)
+            )
+
+        return pipe
+
+    def _apply_data_parallel(
+        self, pipe: Any, device_ids: list[int] | None = None
+    ) -> Any:
+        """Apply data parallelism for multi-GPU inference.
+
+        Args:
+            pipe: The diffusers pipeline
+            device_ids: List of GPU device IDs to use
+
+        Returns:
+            Pipeline with DataParallel-wrapped models
+        """
+        try:
+            from sglang.multimodal_gen.runtime.optimizations.data_parallel import (
+                apply_data_parallel,
+            )
+
+            pipe = apply_data_parallel(pipe, device_ids=device_ids)
+        except Exception as e:
+            logger.warning("Failed to apply data parallelism: %s", e)
+
+        return pipe
+
+    def _apply_torch_compile(self, pipe: Any) -> Any:
+        """Apply torch.compile to transformer/unet components."""
+        compiled_components = []
+
+        # Compile transformer (for DiT-based models like FLUX, SD3, etc.)
+        if hasattr(pipe, "transformer") and pipe.transformer is not None:
+            try:
+                pipe.transformer = torch.compile(
+                    pipe.transformer, mode="max-autotune", fullgraph=False
+                )
+                compiled_components.append("transformer")
+            except Exception as e:
+                logger.warning("Failed to compile transformer: %s", e)
+
+        # Compile unet (for UNet-based models like SD 1.5, SDXL, etc.)
+        if hasattr(pipe, "unet") and pipe.unet is not None:
+            try:
+                pipe.unet = torch.compile(
+                    pipe.unet, mode="max-autotune", fullgraph=False
+                )
+                compiled_components.append("unet")
+            except Exception as e:
+                logger.warning("Failed to compile unet: %s", e)
+
+        if compiled_components:
+            logger.info(
+                "torch.compile enabled for: %s", ", ".join(compiled_components)
+            )
+        else:
+            logger.warning(
+                "torch.compile requested but no compilable components found"
+            )
+
+        return pipe
+
+    def _enable_vae_tiling(self, pipe: Any) -> None:
+        """Enable VAE tiling for high-resolution image generation."""
+        if hasattr(pipe, "vae") and pipe.vae is not None:
+            if hasattr(pipe.vae, "enable_tiling"):
+                pipe.vae.enable_tiling()
+                logger.info("VAE tiling enabled")
+            elif hasattr(pipe, "enable_vae_tiling"):
+                pipe.enable_vae_tiling()
+                logger.info("VAE tiling enabled (pipeline method)")
+
+    def _enable_vae_slicing(self, pipe: Any) -> None:
+        """Enable VAE slicing for batch processing efficiency."""
+        if hasattr(pipe, "vae") and pipe.vae is not None:
+            if hasattr(pipe.vae, "enable_slicing"):
+                pipe.vae.enable_slicing()
+                logger.info("VAE slicing enabled")
+            elif hasattr(pipe, "enable_vae_slicing"):
+                pipe.enable_vae_slicing()
+                logger.info("VAE slicing enabled (pipeline method)")
+
+    def _enable_attention_slicing(self, pipe: Any) -> None:
+        """Enable attention slicing for memory efficiency."""
+        if hasattr(pipe, "enable_attention_slicing"):
+            pipe.enable_attention_slicing("auto")
+            logger.info("Attention slicing enabled")
+
+    def _enable_cpu_offload(self, pipe: Any, sequential: bool = False) -> None:
+        """Enable CPU offloading for memory-constrained systems.
+
+        Args:
+            pipe: The diffusers pipeline
+            sequential: If True, use sequential CPU offload (more aggressive memory saving)
+        """
+        try:
+            if sequential:
+                if hasattr(pipe, "enable_sequential_cpu_offload"):
+                    pipe.enable_sequential_cpu_offload()
+                    logger.info("Sequential CPU offload enabled")
+            else:
+                if hasattr(pipe, "enable_model_cpu_offload"):
+                    pipe.enable_model_cpu_offload()
+                    logger.info("Model CPU offload enabled")
+        except Exception as e:
+            logger.warning("Failed to enable CPU offload: %s", e)
+
+    def _apply_attention_backend(self, pipe: Any, server_args: ServerArgs) -> None:
+        """Apply SGLang attention backend to the diffusers pipeline.
+
+        This replaces diffusers' default attention with SGLang's optimized backends.
+
+        Args:
+            pipe: The diffusers pipeline
+            server_args: Server arguments containing attention backend config
+        """
+        pipeline_config = getattr(server_args, "pipeline_config", None)
+        if not pipeline_config:
+            return
+
+        # Check if attention backend replacement is enabled
+        if not getattr(pipeline_config, "use_sglang_attention", False):
+            return
+
+        # Get backend from server_args or pipeline_config
+        backend = server_args.attention_backend
+        if backend is None:
+            backend = getattr(pipeline_config, "attention_backend", "auto")
+
+        try:
+            from sglang.multimodal_gen.runtime.optimizations.diffusers_attention import (
+                apply_sglang_attention,
+            )
+
+            apply_sglang_attention(pipe, backend=backend)
+        except Exception as e:
+            logger.warning("Failed to apply SGLang attention backend: %s", e)
 
     def _get_dtype(self, server_args: ServerArgs) -> torch.dtype:
         """Determine the dtype to use for model loading."""
