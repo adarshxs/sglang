@@ -19,18 +19,16 @@ from sglang.multimodal_gen.runtime.optimizations.data_parallel import (
     get_available_gpus,
 )
 from sglang.multimodal_gen.runtime.optimizations.diffusers_attention import (
-    SGLangAttnProcessor,
-    SGLangAttnProcessor2_0,
     apply_sglang_attention,
     get_available_attention_backends,
+    reset_attention_backend,
 )
 
 __all__ = [
-    # Attention processors
-    "SGLangAttnProcessor",
-    "SGLangAttnProcessor2_0",
+    # Attention backends (using diffusers native API)
     "apply_sglang_attention",
     "get_available_attention_backends",
+    "reset_attention_backend",
     # Data parallelism
     "DataParallelWrapper",
     "apply_data_parallel",
