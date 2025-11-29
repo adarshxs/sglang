@@ -2,16 +2,12 @@
 """
 SGLang attention backend integration for diffusers pipelines.
 
-Flow:
-1. Query model's supported backends
-2. If requested backend is supported, use SGLang's implementation
-3. Fall back to SDPA
+Uses SGLang's actual attention backend implementations directly.
 """
 
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
@@ -19,106 +15,48 @@ logger = init_logger(__name__)
 
 
 # =============================================================================
-# SGLang Attention Implementations
+# Get SGLang Backend Implementations
 # =============================================================================
 
-def _get_sglang_flash_attn():
-    """Get SGLang's FlashAttention from sgl_kernel."""
+def _get_flash_impl():
+    """Get SGLang FlashAttention implementation."""
     try:
-        from sgl_kernel.flash_attn import flash_attn_varlen_func
-        return flash_attn_varlen_func
+        from sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn import (
+            FlashAttentionImpl,
+        )
+        return FlashAttentionImpl
     except ImportError:
         return None
 
 
-def _get_sglang_sage_attn():
-    """Get SageAttention."""
+def _get_sage_impl():
+    """Get SGLang SageAttention implementation."""
     try:
-        from sageattention import sageattn
-        return sageattn
+        from sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn import (
+            SageAttentionImpl,
+        )
+        return SageAttentionImpl
     except ImportError:
         return None
 
 
-def sglang_flash_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    is_causal: bool = False,
-) -> torch.Tensor:
-    """SGLang FlashAttention. Input: (batch, seq, heads, head_dim)"""
-    flash_fn = _get_sglang_flash_attn()
-    if flash_fn is None:
-        raise ImportError("sgl_kernel.flash_attn not available")
-
-    batch_size, seq_len, num_heads, head_dim = query.shape
-
-    q = query.reshape(-1, num_heads, head_dim)
-    k = key.reshape(-1, num_heads, head_dim)
-    v = value.reshape(-1, num_heads, head_dim)
-
-    cu_seqlens = torch.arange(
-        0, (batch_size + 1) * seq_len, step=seq_len,
-        dtype=torch.int32, device=query.device
-    )
-
-    output = flash_fn(
-        q, k, v,
-        cu_seqlens, cu_seqlens,
-        seq_len, seq_len,
-        softmax_scale=head_dim ** -0.5,
-        causal=is_causal,
-    )
-
-    return output.reshape(batch_size, seq_len, num_heads, head_dim)
-
-
-def sglang_sage_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    is_causal: bool = False,
-) -> torch.Tensor:
-    """SageAttention. Input: (batch, seq, heads, head_dim)"""
-    sage_fn = _get_sglang_sage_attn()
-    if sage_fn is None:
-        raise ImportError("sageattention not available")
-
-    q = query.transpose(1, 2)
-    k = key.transpose(1, 2)
-    v = value.transpose(1, 2)
-
-    output = sage_fn(q, k, v, is_causal=is_causal, smooth_k=True)
-    return output.transpose(1, 2)
-
-
-def sdpa_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    is_causal: bool = False,
-) -> torch.Tensor:
-    """PyTorch SDPA. Input: (batch, seq, heads, head_dim)"""
-    q = query.transpose(1, 2)
-    k = key.transpose(1, 2)
-    v = value.transpose(1, 2)
-
-    output = F.scaled_dot_product_attention(
-        q, k, v,
-        attn_mask=None,
-        dropout_p=0.0,
-        is_causal=is_causal,
-        scale=query.shape[-1] ** -0.5,
-    )
-    return output.transpose(1, 2)
+def _get_sdpa_impl():
+    """Get SGLang SDPA implementation."""
+    try:
+        from sglang.multimodal_gen.runtime.layers.attention.backends.sdpa import (
+            SDPAImpl,
+        )
+        return SDPAImpl
+    except ImportError:
+        return None
 
 
 # =============================================================================
-# Backend Detection & Mapping
+# Backend Selection
 # =============================================================================
 
 # User input → canonical backend type
-_CANONICAL_MAP = {
+_BACKEND_MAP = {
     # Flash variants
     "fa": "flash",
     "fa3": "flash",
@@ -127,141 +65,116 @@ _CANONICAL_MAP = {
     "flash": "flash",
     "sglang_fa": "flash",
     "_flash_3": "flash",
-    # Sage variants
+    # Sage variants  
     "sage": "sage",
     "sage_attn": "sage",
     "sglang_sage": "sage",
     # SDPA variants
-    "sdpa": "native",
-    "native": "native",
-    "torch_sdpa": "native",
-    "sglang_sdpa": "native",
-}
-
-# Canonical type → SGLang implementation
-_SGLANG_IMPL = {
-    "flash": (sglang_flash_attention, _get_sglang_flash_attn),
-    "sage": (sglang_sage_attention, _get_sglang_sage_attn),
-    "native": (sdpa_attention, lambda: True),
+    "sdpa": "sdpa",
+    "native": "sdpa",
+    "torch_sdpa": "sdpa",
+    "sglang_sdpa": "sdpa",
 }
 
 
-def _get_model_supported_backends(model) -> set[str]:
-    """
-    Get backends the model supports by probing set_attention_backend.
-    Returns set of supported backend names.
-    """
-    if not hasattr(model, "set_attention_backend"):
-        return set()
-
-    # Try invalid backend to get list from error message
-    try:
-        model.set_attention_backend("__invalid__")
-        return set()  # Shouldn't happen
-    except Exception as e:
-        error_msg = str(e)
-        # Parse: "must be one of the following: flash, sage, native, ..."
-        if "must be one of the following:" in error_msg:
-            backends_str = error_msg.split("must be one of the following:")[-1]
-            backends = {b.strip() for b in backends_str.split(",")}
-            return backends
-        return set()
+def _get_best_backend() -> tuple[str, Any]:
+    """Auto-select best available backend. Returns (name, impl_class)."""
+    # Try flash first
+    flash_impl = _get_flash_impl()
+    if flash_impl is not None:
+        return "flash", flash_impl
+    
+    # Try sage
+    sage_impl = _get_sage_impl()
+    if sage_impl is not None:
+        return "sage", sage_impl
+    
+    # Fall back to SDPA
+    sdpa_impl = _get_sdpa_impl()
+    return "sdpa", sdpa_impl
 
 
-def _check_backend_supported(supported: set[str], canonical: str) -> bool:
-    """Check if canonical backend type is in model's supported list."""
+def _get_backend_impl(backend: str) -> tuple[str, Any]:
+    """Get implementation for specified backend. Returns (name, impl_class)."""
+    canonical = _BACKEND_MAP.get(backend, backend)
+    
     if canonical == "flash":
-        return any(b in supported for b in ["flash", "_flash_3", "flash_varlen", "_flash_varlen_3"])
-    elif canonical == "sage":
-        return any(b in supported for b in ["sage", "sage_varlen", "_sage_qk_int8_pv_fp8_cuda"])
-    elif canonical == "native":
-        return "native" in supported
-    return False
+        impl = _get_flash_impl()
+        if impl is not None:
+            return "flash", impl
+        logger.warning("FlashAttention not available, trying sage")
+        canonical = "sage"
+    
+    if canonical == "sage":
+        impl = _get_sage_impl()
+        if impl is not None:
+            return "sage", impl
+        logger.warning("SageAttention not available, using SDPA")
+        canonical = "sdpa"
+    
+    # SDPA fallback
+    return "sdpa", _get_sdpa_impl()
 
 
 # =============================================================================
 # Main API
 # =============================================================================
 
+# Global attention implementation instance
+_attn_impl = None
+_attn_name = None
+
+
 def apply_sglang_attention(pipe: Any, backend: str = "auto") -> None:
     """
     Apply SGLang attention backend to diffusers pipeline.
 
-    Flow:
-    1. Query model's supported backends
-    2. Map requested backend to canonical type (flash/sage/native)
-    3. If model supports it AND SGLang has implementation → use SGLang
-    4. Fall back to SDPA
+    Uses SGLang's actual attention implementations:
+    - FlashAttentionImpl (sgl_kernel.flash_attn)
+    - SageAttentionImpl (sageattention)
+    - SDPAImpl (torch.nn.functional.scaled_dot_product_attention)
 
     Args:
         pipe: Diffusers pipeline
         backend: "auto", "fa", "flash", "sage", "sdpa", etc.
     """
-    # Find model
-    model = None
-    model_name = None
-    if hasattr(pipe, "transformer") and pipe.transformer is not None:
-        model = pipe.transformer
-        model_name = "transformer"
-    elif hasattr(pipe, "unet") and pipe.unet is not None:
-        model = pipe.unet
-        model_name = "unet"
-
-    if model is None:
-        logger.warning("No transformer/unet found in pipeline")
+    global _attn_impl, _attn_name
+    
+    # Get backend implementation
+    if backend == "auto":
+        name, impl_cls = _get_best_backend()
+    else:
+        name, impl_cls = _get_backend_impl(backend)
+    
+    if impl_cls is None:
+        logger.error("No attention backend available!")
         return
-
-    # Get model's supported backends
-    supported = _get_model_supported_backends(model)
-    if supported:
-        logger.debug("Model supports backends: %s", supported)
-
-    # Map to canonical type
-    canonical = _CANONICAL_MAP.get(backend, backend)
-
-    # Auto-select best available
-    if backend == "auto" or canonical == "auto":
-        for try_canonical in ["flash", "sage", "native"]:
-            impl_fn, check_fn = _SGLANG_IMPL[try_canonical]
-            if check_fn() is not None and (not supported or _check_backend_supported(supported, try_canonical)):
-                canonical = try_canonical
-                break
-        else:
-            canonical = "native"
-        logger.info("Auto-selected: %s", canonical)
-
-    # Check if model supports this backend
-    if supported and not _check_backend_supported(supported, canonical):
-        logger.warning(
-            "Model doesn't support '%s', falling back to SDPA",
-            canonical
-        )
-        canonical = "native"
-
-    # Get SGLang implementation
-    impl_fn, check_fn = _SGLANG_IMPL.get(canonical, (sdpa_attention, lambda: True))
-
-    # Verify SGLang backend is available
-    if check_fn() is None:
-        logger.warning("SGLang %s not available, using SDPA", canonical)
-        impl_fn = sdpa_attention
-        canonical = "native"
-
+    
+    # Create implementation instance
+    # Default params work for most diffusers models
+    _attn_impl = impl_cls(
+        num_heads=1,  # Not used in forward
+        head_size=64,  # Not used in forward
+        causal=False,
+        softmax_scale=None,  # Will be computed from head_dim
+    )
+    _attn_name = name
+    
     # Patch diffusers dispatch
-    _patch_attention_dispatch(impl_fn, canonical)
+    _patch_attention_dispatch()
+    logger.info("Using SGLang %s attention backend", name)
 
 
-def _patch_attention_dispatch(attn_fn, backend_name: str) -> None:
-    """Patch diffusers' attention dispatch."""
+def _patch_attention_dispatch() -> None:
+    """Patch diffusers' attention dispatch to use SGLang backend."""
     try:
         from diffusers.models import attention_dispatch
-
-        original = getattr(
-            attention_dispatch, "_original_dispatch", None
-        ) or attention_dispatch.dispatch_attention_fn
-        attention_dispatch._original_dispatch = original
-
-        def patched_dispatch(
+        
+        # Store original
+        if not hasattr(attention_dispatch, "_original_dispatch"):
+            attention_dispatch._original_dispatch = attention_dispatch.dispatch_attention_fn
+        
+        def sglang_dispatch(
             query: torch.Tensor,
             key: torch.Tensor,
             value: torch.Tensor,
@@ -271,10 +184,28 @@ def _patch_attention_dispatch(attn_fn, backend_name: str) -> None:
             scale: float = None,
             **kwargs,
         ) -> torch.Tensor:
-            return attn_fn(query, key, value, is_causal=is_causal)
-
-        attention_dispatch.dispatch_attention_fn = patched_dispatch
-        logger.info("Using SGLang %s attention", backend_name)
-
+            global _attn_impl
+            
+            # Update causal flag
+            _attn_impl.causal = is_causal
+            
+            # Compute softmax scale if not provided
+            if scale is not None:
+                _attn_impl.softmax_scale = scale
+            else:
+                _attn_impl.softmax_scale = query.shape[-1] ** -0.5
+            
+            # Call SGLang implementation
+            return _attn_impl.forward(query, key, value, attn_metadata=None)
+        
+        attention_dispatch.dispatch_attention_fn = sglang_dispatch
+        
+    except ImportError:
+        logger.warning("diffusers.models.attention_dispatch not available")
     except Exception as e:
-        logger.warning("Could not patch attention dispatch: %s", e)
+        logger.warning("Failed to patch attention dispatch: %s", e)
+
+
+def get_current_backend() -> str | None:
+    """Get name of currently active backend."""
+    return _attn_name

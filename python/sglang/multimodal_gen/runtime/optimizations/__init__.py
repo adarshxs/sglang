@@ -9,16 +9,12 @@ from sglang.multimodal_gen.runtime.optimizations.data_parallel import (
 )
 from sglang.multimodal_gen.runtime.optimizations.diffusers_attention import (
     apply_sglang_attention,
-    sdpa_attention,
-    sglang_flash_attention,
-    sglang_sage_attention,
+    get_current_backend,
 )
 
 __all__ = [
     "apply_sglang_attention",
-    "sglang_flash_attention",
-    "sglang_sage_attention",
-    "sdpa_attention",
+    "get_current_backend",
     "DataParallelWrapper",
     "apply_data_parallel",
     "enable_device_map_parallel",
