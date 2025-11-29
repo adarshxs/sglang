@@ -407,12 +407,19 @@ class ServerArgs:
         )
 
         # attention
+        # Include native SGLang backends + diffusers-specific backends for --backend diffusers
+        diffusers_backends = [
+            "flash", "_flash_3", "_flash_3_hub",  # diffusers FlashAttention
+            "sage", "sage_hub",  # diffusers SageAttention
+            "native", "xformers", "flex",  # diffusers native/xformers
+            "sglang_fa", "sglang_sage", "sglang_sdpa",  # SGLang raw backends
+        ]
         parser.add_argument(
             "--attention-backend",
             type=str,
             default=None,
-            choices=[e.name.lower() for e in AttentionBackendEnum] + ["fa3", "fa4"],
-            help="The attention backend to use. If not specified, the backend is automatically selected based on hardware and installed packages.",
+            choices=[e.name.lower() for e in AttentionBackendEnum] + ["fa3", "fa4"] + diffusers_backends,
+            help="The attention backend to use. For --backend diffusers, supports: flash, _flash_3, sage, native, xformers, sglang_fa, sglang_sage. If not specified, automatically selected.",
         )
 
         # Running mode
