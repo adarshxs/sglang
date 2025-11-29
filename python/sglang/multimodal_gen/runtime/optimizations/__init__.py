@@ -2,14 +2,7 @@
 """
 SGLang optimizations for diffusers backend.
 
-This module provides optimization utilities that can be applied to diffusers pipelines
-to leverage SGLang's high-performance backends.
-
-Available optimizations:
-- Attention backends: FlashAttention, SageAttention, SDPA
-- Data parallelism: Multi-GPU batch processing
-- Memory optimizations: VAE tiling/slicing, CPU offloading
-- Compilation: torch.compile for transformer/unet
+Provides attention backend integration and data parallelism.
 """
 
 from sglang.multimodal_gen.runtime.optimizations.data_parallel import (
@@ -20,28 +13,20 @@ from sglang.multimodal_gen.runtime.optimizations.data_parallel import (
 )
 from sglang.multimodal_gen.runtime.optimizations.diffusers_attention import (
     apply_sglang_attention,
-    get_available_attention_backends,
-    register_sglang_backends_with_diffusers,
-    reset_attention_backend,
+    sdpa_attention,
     sglang_flash_attention,
     sglang_sage_attention,
-    sglang_sdpa_attention,
 )
 
 __all__ = [
-    # Attention backends (using diffusers native API)
+    # Attention
     "apply_sglang_attention",
-    "get_available_attention_backends",
-    "reset_attention_backend",
-    # SGLang attention functions (raw, no parallelism)
-    "register_sglang_backends_with_diffusers",
     "sglang_flash_attention",
     "sglang_sage_attention",
-    "sglang_sdpa_attention",
+    "sdpa_attention",
     # Data parallelism
     "DataParallelWrapper",
     "apply_data_parallel",
     "enable_device_map_parallel",
     "get_available_gpus",
 ]
-
