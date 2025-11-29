@@ -1,130 +1,148 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-SGLang attention backend integration for diffusers pipelines.
-Clean version with NO try/except blocks.
+SGLang attention backends for diffusers.
+
+Goal: Use SGLang's attention implementations (flash, sage, sdpa) with diffusers models.
+If requested backend unavailable, fall back to diffusers default.
 """
 
-from typing import Any
 import torch
-
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-from sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn import FlashAttentionImpl
-from sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn import SageAttentionImpl
-from sglang.multimodal_gen.runtime.layers.attention.backends.sdpa import SDPAImpl
-
-from diffusers.models import attention_dispatch
 
 logger = init_logger(__name__)
 
-
 # =============================================================================
-# Backend fetching (no try/except)
-# =============================================================================
-
-def _get_flash_impl():
-    return FlashAttentionImpl
-
-def _get_sage_impl():
-    return SageAttentionImpl
-
-def _get_sdpa_impl():
-    return SDPAImpl
-
-
-# =============================================================================
-# Backend registry
+# Backend name mapping (CLI → canonical)
 # =============================================================================
 
-_BACKEND_MAP = {
-    "fa": "flash",
-    "fa3": "flash",
-    "fa4": "flash",
-    "flash": "flash",
-    "flash_attn": "flash",
-    "_flash_3": "flash",
-    "_flash_3_hub": "flash",
-    "sglang_fa": "flash",
-
-    "sage": "sage",
-    "sage_attn": "sage",
-    "sage_attn_three": "sage",
-    "sage_hub": "sage",
-    "sglang_sage": "sage",
-
-    "sdpa": "sdpa",
-    "native": "sdpa",
-    "torch_sdpa": "sdpa",
-    "sglang_sdpa": "sdpa",
-    "xformers": "sdpa",
-    "flex": "sdpa",
+BACKEND_ALIASES = {
+    "fa": "flash", "fa3": "flash", "fa4": "flash", "flash_attn": "flash",
+    "sage_attn": "sage", "sage_attn_three": "sage",
+    "torch_sdpa": "sdpa", "native": "sdpa",
 }
 
 
+def _resolve_backend(name: str) -> str:
+    """Resolve alias to canonical name."""
+    return BACKEND_ALIASES.get(name, name)
+
+
 # =============================================================================
-# Backend selection
+# Load SGLang backend implementations
 # =============================================================================
 
-def _get_best_backend() -> tuple[str, Any]:
-    """Choose best backend: flash → sage → sdpa."""
-    return "flash", FlashAttentionImpl
+def _load_impl(backend: str):
+    """
+    Load SGLang attention implementation.
+    Returns (impl_instance, backend_name) or (None, None) if unavailable.
+    """
+    backend = _resolve_backend(backend)
+
+    if backend == "flash":
+        try:
+            from sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn import (
+                FlashAttentionImpl,
+            )
+            impl = FlashAttentionImpl(
+                num_heads=1, head_size=64, causal=False, softmax_scale=None
+            )
+            return impl, "flash"
+        except ImportError:
+            logger.debug("FlashAttention (sgl_kernel) not available")
+
+    if backend == "sage":
+        try:
+            from sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn import (
+                SageAttentionImpl,
+            )
+            impl = SageAttentionImpl(
+                num_heads=1, head_size=64, causal=False, softmax_scale=None
+            )
+            return impl, "sage"
+        except ImportError:
+            logger.debug("SageAttention not available")
+
+    if backend == "sdpa":
+        from sglang.multimodal_gen.runtime.layers.attention.backends.sdpa import (
+            SDPAImpl,
+        )
+        impl = SDPAImpl(
+            num_heads=1, head_size=64, causal=False, softmax_scale=None
+        )
+        return impl, "sdpa"
+
+    return None, None
 
 
-def _get_backend_impl(backend: str) -> tuple[str, Any]:
-    canonical = _BACKEND_MAP.get(backend, backend)
-
-    if canonical == "flash":
-        return "flash", FlashAttentionImpl
-
-    if canonical == "sage":
-        return "sage", SageAttentionImpl
-
-    return "sdpa", SDPAImpl
+def _load_best_impl():
+    """Load best available: flash → sage → sdpa."""
+    for backend in ["flash", "sage", "sdpa"]:
+        impl, name = _load_impl(backend)
+        if impl is not None:
+            return impl, name
+    return None, None
 
 
 # =============================================================================
 # Global state
 # =============================================================================
 
-_attn_impl = None
-_attn_name = None
+_impl = None
+_name = None
+_patched = False
 
 
 # =============================================================================
-# Main API
+# Public API
 # =============================================================================
 
-def apply_sglang_attention(pipe: Any, backend: str = "auto") -> None:
-    global _attn_impl, _attn_name
+def apply_sglang_attention(pipe, backend: str = "auto") -> bool:
+    """
+    Apply SGLang attention to diffusers pipeline.
 
-    # Select implementation
+    Args:
+        pipe: Diffusers pipeline (unused, kept for interface compatibility)
+        backend: "auto", "flash", "fa", "sage", "sdpa", etc.
+
+    Returns:
+        True if SGLang backend applied, False if using diffusers default.
+    """
+    global _impl, _name, _patched
+
+    # Load implementation
     if backend == "auto":
-        name, impl_cls = _get_best_backend()
+        _impl, _name = _load_best_impl()
     else:
-        name, impl_cls = _get_backend_impl(backend)
+        _impl, _name = _load_impl(backend)
+        if _impl is None:
+            # Requested backend unavailable, try fallback
+            logger.warning("%s not available, trying fallback", backend)
+            _impl, _name = _load_best_impl()
 
-    _attn_impl = impl_cls(
-        num_heads=1,
-        head_size=64,
-        causal=False,
-        softmax_scale=None,
-    )
-    _attn_name = name
+    if _impl is None:
+        logger.warning("No SGLang attention backend available, using diffusers default")
+        return False
 
-    _patch_attention_dispatch()
+    # Patch diffusers dispatch
+    if not _patched:
+        _patch_diffusers()
+        _patched = True
 
-    logger.info("Using SGLang %s attention backend", name)
+    logger.info("Using SGLang %s attention", _name)
+    return True
 
 
-# =============================================================================
-# Patch diffusers attention dispatch
-# =============================================================================
+def _patch_diffusers():
+    """Patch diffusers' attention dispatch to use SGLang."""
+    try:
+        from diffusers.models import attention_dispatch
+    except ImportError:
+        logger.warning("diffusers.models.attention_dispatch not found")
+        return
 
-def _patch_attention_dispatch() -> None:
-    """Override diffusers attention dispatch with SGLang backend."""
-
-    # Store original
-    if not hasattr(attention_dispatch, "_original_dispatch"):
-        attention_dispatch._original_dispatch = attention_dispatch.dispatch_attention_fn
+    # Save original
+    if not hasattr(attention_dispatch, "_sglang_original"):
+        attention_dispatch._sglang_original = attention_dispatch.dispatch_attention_fn
 
     def sglang_dispatch(
         query: torch.Tensor,
@@ -136,16 +154,42 @@ def _patch_attention_dispatch() -> None:
         scale: float = None,
         **kwargs,
     ) -> torch.Tensor:
-        global _attn_impl
+        """Route attention through SGLang backend."""
+        global _impl
 
-        # Update runtime properties
-        _attn_impl.causal = is_causal
-        _attn_impl.softmax_scale = scale or query.shape[-1] ** -0.5
+        if _impl is None:
+            # Fallback to original
+            return attention_dispatch._sglang_original(
+                query, key, value, attn_mask, dropout_p, is_causal, scale, **kwargs
+            )
 
-        return _attn_impl.forward(query, key, value, attn_metadata=None)
+        # Configure impl for this call
+        _impl.causal = is_causal
+        _impl.softmax_scale = scale if scale else query.shape[-1] ** -0.5
+
+        # SGLang backends expect (batch, seq, heads, head_dim)
+        # diffusers dispatch provides same shape
+        return _impl.forward(query, key, value, attn_metadata=None)
 
     attention_dispatch.dispatch_attention_fn = sglang_dispatch
 
 
 def get_current_backend() -> str | None:
-    return _attn_name
+    """Get name of active backend."""
+    return _name
+
+
+def reset():
+    """Reset to diffusers default."""
+    global _impl, _name, _patched
+
+    try:
+        from diffusers.models import attention_dispatch
+        if hasattr(attention_dispatch, "_sglang_original"):
+            attention_dispatch.dispatch_attention_fn = attention_dispatch._sglang_original
+    except ImportError:
+        pass
+
+    _impl = None
+    _name = None
+    _patched = False
