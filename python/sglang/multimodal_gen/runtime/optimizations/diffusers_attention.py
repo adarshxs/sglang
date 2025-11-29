@@ -252,6 +252,65 @@ def get_available_attention_backends() -> list[str]:
     return available
 
 
+def _patch_diffusers_attention_dispatch(backend: str) -> bool:
+    """
+    Directly patch diffusers' attention dispatch to use SGLang's attention.
+    
+    This bypasses set_attention_backend() validation by patching the dispatch
+    function itself.
+    """
+    try:
+        from diffusers.models import attention_dispatch
+        
+        # Get the SGLang attention function
+        if backend == "sglang_fa":
+            attn_fn = sglang_flash_attention
+        elif backend == "sglang_sage":
+            attn_fn = sglang_sage_attention
+        elif backend == "sglang_sdpa":
+            attn_fn = sglang_sdpa_attention
+        else:
+            return False
+        
+        # Store original dispatch function
+        original_dispatch = getattr(attention_dispatch, "_original_dispatch_attention_fn", None)
+        if original_dispatch is None:
+            original_dispatch = attention_dispatch.dispatch_attention_fn
+            attention_dispatch._original_dispatch_attention_fn = original_dispatch
+        
+        # Create wrapper that uses SGLang attention
+        def sglang_dispatch_attention_fn(
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            attn_mask: torch.Tensor = None,
+            dropout_p: float = 0.0,
+            is_causal: bool = False,
+            scale: float = None,
+            **kwargs,
+        ) -> torch.Tensor:
+            try:
+                # Use SGLang attention
+                return attn_fn(query, key, value, is_causal=is_causal)
+            except Exception:
+                # Fall back to original dispatch on any error
+                return original_dispatch(
+                    query, key, value, attn_mask, dropout_p, is_causal, scale, **kwargs
+                )
+        
+        # Patch the dispatch function
+        attention_dispatch.dispatch_attention_fn = sglang_dispatch_attention_fn
+        logger.info("Patched diffusers attention dispatch with SGLang %s", backend)
+        return True
+        
+    except ImportError:
+        logger.debug("diffusers.models.attention_dispatch not available")
+        return False
+    except Exception as e:
+        logger.debug("Failed to patch attention dispatch: %s", e)
+        return False
+
+
 def apply_sglang_attention(
     pipe: Any,
     backend: str = "auto",
@@ -259,61 +318,56 @@ def apply_sglang_attention(
     """
     Apply optimized attention backend to a diffusers pipeline.
 
-    Uses diffusers' native set_attention_backend() API which handles
-    all model types correctly (including video models like Wan, CogVideoX, etc.)
+    For SGLang backends (sglang_fa, sglang_sage), directly patches diffusers'
+    attention dispatch function to use SGLang's implementations.
 
-    Supports both diffusers backends and SGLang-specific backends:
-    - "fa", "flash", "_flash_3": FlashAttention via diffusers
-    - "sage": SageAttention via diffusers
-    - "sglang_fa": SGLang's FlashAttention (bypasses parallelism)
-    - "sglang_sage": SGLang's SageAttention (bypasses parallelism)
+    For diffusers backends (flash, sage, native), uses set_attention_backend().
 
     Args:
         pipe: A diffusers pipeline
         backend: Attention backend. Options:
             - "auto": Auto-select best available
-            - "fa", "flash": FlashAttention 2
-            - "fa3", "_flash_3": FlashAttention 3
-            - "sage", "sage_attn": SageAttention
-            - "native", "sdpa", "torch_sdpa": PyTorch native SDPA
-            - "xformers": xFormers memory-efficient attention
-            - "sglang_fa": SGLang FlashAttention (raw, no parallelism)
-            - "sglang_sage": SGLang SageAttention (raw, no parallelism)
+            - "sglang_fa": SGLang FlashAttention (RECOMMENDED - uses sgl_kernel)
+            - "sglang_sage": SGLang SageAttention
+            - "sglang_sdpa": SGLang SDPA wrapper
+            - "fa", "flash", "_flash_3": diffusers FlashAttention
+            - "sage": diffusers SageAttention
+            - "native": PyTorch SDPA
     """
-    # Map to diffusers/sglang backend name
-    diffusers_backend = _BACKEND_NAME_MAP.get(backend, backend)
+    # Map to backend name
+    mapped_backend = _BACKEND_NAME_MAP.get(backend, backend)
 
-    # If using SGLang-specific backend, register it with diffusers
-    if diffusers_backend.startswith("sglang_"):
-        registered = register_sglang_backends_with_diffusers()
-        if registered:
-            # Keep using the sglang_ backend name since registration succeeded
-            logger.info("Using registered SGLang backend: %s", diffusers_backend)
+    # Handle auto selection - prefer SGLang backends
+    if mapped_backend == "auto":
+        if _get_sglang_flash_attn() is not None:
+            mapped_backend = "sglang_fa"
+            logger.info("Auto-selected SGLang FlashAttention backend")
+        elif _get_sglang_sage_attn() is not None:
+            mapped_backend = "sglang_sage"
+            logger.info("Auto-selected SGLang SageAttention backend")
         else:
-            # Fall back to equivalent diffusers backend only if registration failed
+            mapped_backend = "native"
+            logger.info("Auto-selected native SDPA backend")
+
+    # For SGLang backends, patch the dispatch function directly
+    if mapped_backend.startswith("sglang_"):
+        success = _patch_diffusers_attention_dispatch(mapped_backend)
+        if success:
+            return  # Successfully patched, we're done
+        else:
+            # Fall back to equivalent diffusers backend
             fallback = {
                 "sglang_fa": "flash",
-                "sglang_sage": "sage", 
+                "sglang_sage": "sage",
                 "sglang_sdpa": "native",
             }
-            original = diffusers_backend
-            diffusers_backend = fallback.get(diffusers_backend, "native")
-            logger.info(
-                "SGLang registration failed, using diffusers backend '%s' (for %s)",
-                diffusers_backend,
-                original,
+            mapped_backend = fallback.get(mapped_backend, "native")
+            logger.warning(
+                "Could not patch SGLang attention, falling back to diffusers '%s'",
+                mapped_backend,
             )
 
-    # Handle auto selection
-    if diffusers_backend == "auto":
-        available = get_available_attention_backends()
-        for candidate in _AUTO_BACKENDS:
-            if candidate in available:
-                diffusers_backend = candidate
-                break
-        logger.info("Auto-selected attention backend: %s", diffusers_backend)
-
-    # Find models to configure
+    # For diffusers backends, use set_attention_backend with fallback
     models = []
     if hasattr(pipe, "transformer") and pipe.transformer is not None:
         models.append(("transformer", pipe.transformer))
@@ -326,43 +380,22 @@ def apply_sglang_attention(
 
     for name, model in models:
         if not hasattr(model, "set_attention_backend"):
-            logger.info(
-                "%s does not support set_attention_backend (diffusers version may be old)",
-                name,
-            )
+            logger.info("%s does not support set_attention_backend", name)
             continue
 
-        # Try backends in order of preference with fallback
-        backends_to_try = [diffusers_backend]
-        
-        # Add fallbacks based on requested backend
-        if diffusers_backend in ("sglang_fa", "flash", "_flash_3"):
-            backends_to_try.extend(["_flash_3", "flash", "native"])
-        elif diffusers_backend in ("sglang_sage", "sage"):
-            backends_to_try.extend(["sage", "native"])
-        elif diffusers_backend not in ("native",):
+        # Try backends with fallback to native
+        backends_to_try = [mapped_backend]
+        if mapped_backend != "native":
             backends_to_try.append("native")
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        backends_to_try = [b for b in backends_to_try if not (b in seen or seen.add(b))]
-        
-        success = False
-        for backend in backends_to_try:
+
+        for try_backend in backends_to_try:
             try:
-                model.set_attention_backend(backend)
-                logger.info("Set attention backend '%s' on %s", backend, name)
-                success = True
+                model.set_attention_backend(try_backend)
+                logger.info("Set attention backend '%s' on %s", try_backend, name)
                 break
             except Exception as e:
-                logger.debug("Backend '%s' failed on %s: %s", backend, name, e)
+                logger.debug("Backend '%s' failed: %s", try_backend, e)
                 continue
-        
-        if not success:
-            logger.warning(
-                "Could not set any attention backend on %s, using model default",
-                name,
-            )
 
 
 def reset_attention_backend(pipe: Any) -> None:
