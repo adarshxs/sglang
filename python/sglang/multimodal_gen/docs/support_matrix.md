@@ -50,6 +50,12 @@ default parameters when initializing and generating videos.
 | Qwen Image       | `Qwen/Qwen-Image`                       | Any resolution |
 | Qwen Image 2512  | `Qwen/Qwen-Image-2512`                  | Any resolution |
 | Qwen Image Edit  | `Qwen/Qwen-Image-Edit`                  | Any resolution |
+| HunyuanImage-3.0 | `tencent/HunyuanImage-3.0`              | 512-2048 (aligned to 16) |
+
+**Note**: HunyuanImage-3.0 checkpoints are typically used via local paths (the HF ID has a dot in the name).
+If the repo does not include `model_index.json`, set `pipeline_class_name=HunyuanImage3Pipeline` when launching.
+Install the runtime via the official repo (`pip install git+https://github.com/Tencent-Hunyuan/HunyuanImage-3.0.git`,
+Python 3.12+).
 
 ## Verified LoRA Examples
 

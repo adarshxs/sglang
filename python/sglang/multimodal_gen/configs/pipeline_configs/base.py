@@ -542,17 +542,16 @@ class PipelineConfig:
         )
         from sglang.multimodal_gen.registry import get_pipeline_config_classes
 
-        # If model_path is a safetensors file and pipeline_class_name is specified,
-        # try to get PipelineConfig from the registry first
-        if is_safetensors_file and pipeline_class_name:
+        pipeline_config_cls = None
+        if pipeline_class_name:
             config_classes = get_pipeline_config_classes(pipeline_class_name)
             if config_classes is not None:
                 pipeline_config_cls, _ = config_classes
                 logger.info(
-                    f"Detected safetensors file with {pipeline_class_name}, "
-                    f"using {pipeline_config_cls.__name__} directly without model_index.json"
+                    f"Using pipeline_class_name={pipeline_class_name} with "
+                    f"PipelineConfig={pipeline_config_cls.__name__}"
                 )
-            else:
+            elif is_safetensors_file:
                 model_info = get_model_info(model_path, backend=kwargs.get("backend"))
                 if model_info is None:
                     from sglang.multimodal_gen.registry import (
@@ -568,7 +567,8 @@ class PipelineConfig:
                         f"Available pipelines with config classes: {available_pipelines}"
                     )
                 pipeline_config_cls = model_info.pipeline_config_cls
-        else:
+
+        if pipeline_config_cls is None:
             model_info = get_model_info(model_path, backend=kwargs.get("backend"))
             if model_info is None:
                 raise ValueError(

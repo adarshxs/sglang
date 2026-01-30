@@ -31,6 +31,7 @@ from sglang.multimodal_gen.configs.pipeline_configs import (
     FastHunyuanConfig,
     FluxPipelineConfig,
     HunyuanConfig,
+    HunyuanImage3PipelineConfig,
     WanI2V480PConfig,
     WanI2V720PConfig,
     WanT2V480PConfig,
@@ -74,6 +75,9 @@ from sglang.multimodal_gen.configs.sample.glmimage import GlmImageSamplingParams
 from sglang.multimodal_gen.configs.sample.hunyuan import (
     FastHunyuanSamplingParam,
     HunyuanSamplingParams,
+)
+from sglang.multimodal_gen.configs.sample.hunyuan_image3 import (
+    HunyuanImage3SamplingParams,
 )
 from sglang.multimodal_gen.configs.sample.ltx_2 import LTX2SamplingParams
 from sglang.multimodal_gen.configs.sample.mova import (
@@ -448,12 +452,29 @@ def _register_configs():
 
     # Hunyuan
     register_configs(
+        sampling_param_cls=HunyuanImage3SamplingParams,
+        pipeline_config_cls=HunyuanImage3PipelineConfig,
+        hf_model_paths=[
+            "tencent/HunyuanImage-3.0",
+            "tencent/HunyuanImage-3.0-Instruct",
+            "tencent/HunyuanImage-3.0-Instruct-Distil",
+        ],
+        model_detectors=[
+            lambda hf_id: "hunyuanimage3" in hf_id.lower()
+            or "hunyuanimage-3" in hf_id.lower()
+            or "hunyuan_image_3" in hf_id.lower()
+        ],
+    )
+    register_configs(
         sampling_param_cls=HunyuanSamplingParams,
         pipeline_config_cls=HunyuanConfig,
         hf_model_paths=[
             "hunyuanvideo-community/HunyuanVideo",
         ],
-        model_detectors=[lambda hf_id: "hunyuan" in hf_id.lower()],
+        model_detectors=[
+            lambda hf_id: "hunyuan" in hf_id.lower()
+            and "image" not in hf_id.lower()
+        ],
     )
     register_configs(
         sampling_param_cls=FastHunyuanSamplingParam,
