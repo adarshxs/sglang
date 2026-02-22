@@ -27,9 +27,79 @@ def set_default_torch_dtype(dtype: torch.dtype):
     torch.set_default_dtype(old_dtype)
 
 
+def _is_moe_model(model_config: ModelConfig, architectures: list[str]) -> bool:
+    lowered_arches = [arch.lower() for arch in architectures]
+    if any("moe" in arch or "mixtral" in arch for arch in lowered_arches):
+        return True
+
+    text_config = model_config.hf_text_config
+    expert_attrs = (
+        "num_local_experts",
+        "num_experts",
+        "num_experts_per_tok",
+        "moe_intermediate_size",
+        "n_routed_experts",
+    )
+    for attr in expert_attrs:
+        value = getattr(text_config, attr, None)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            if value:
+                return True
+            continue
+        if isinstance(value, (int, float)):
+            threshold = 0 if attr == "moe_intermediate_size" else 1
+            if value > threshold:
+                return True
+            continue
+        if isinstance(value, (list, tuple, set, dict)):
+            if len(value) > 0:
+                return True
+            continue
+        if isinstance(value, str) and value == "":
+            continue
+        if value is not None:
+            return True
+    return False
+
+
+def _is_sequence_classification_model(architectures: list[str]) -> bool:
+    return any(
+        "sequenceclassification" in lowered or "rewardmodel" in lowered
+        for lowered in (arch.lower() for arch in architectures)
+    )
+
+
+def _get_transformers_backend_arch(
+    model_config: ModelConfig, architectures: list[str]
+) -> str:
+    is_pooling = not model_config.is_generation
+    is_multimodal = model_config.is_multimodal or (
+        model_config.hf_config is not model_config.hf_text_config
+    )
+    is_moe = _is_moe_model(model_config, architectures)
+    base_arch = "ForCausalLM"
+    if is_pooling:
+        base_arch = (
+            "ForSequenceClassification"
+            if _is_sequence_classification_model(architectures)
+            else "EmbeddingModel"
+        )
+
+    arch = "Transformers"
+    if is_multimodal:
+        arch += "MultiModal"
+    if is_moe:
+        arch += "MoE"
+    return arch + base_arch
+
+
 def resolve_transformers_arch(model_config: ModelConfig, architectures: list[str]):
-    for i, arch in enumerate(architectures):
-        if arch == "TransformersForCausalLM":
+    backend_arch = _get_transformers_backend_arch(model_config, architectures)
+
+    for arch in architectures:
+        if arch.startswith("Transformers"):
             continue
         auto_map: dict[str, str] = (
             getattr(model_config.hf_config, "auto_map", None) or dict()
@@ -42,32 +112,58 @@ def resolve_transformers_arch(model_config: ModelConfig, architectures: list[str
         #     "AutoModel": "<your-repo-name>--<config-name>",
         #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
         # },
-        auto_modules = {
-            name: get_class_from_dynamic_module(
-                module, model_config.model_path, revision=model_config.revision
+        auto_modules = {}
+        try:
+            auto_modules = {
+                name: get_class_from_dynamic_module(
+                    module, model_config.model_path, revision=model_config.revision
+                )
+                for name, module in sorted(auto_map.items(), key=lambda x: x[0])
+            }
+        except Exception as e:
+            logger.warning(
+                "Failed to load dynamic modules from auto_map for '%s': %s. "
+                "Skipping remote model compatibility checks.",
+                arch,
+                e,
             )
-            for name, module in sorted(auto_map.items(), key=lambda x: x[0])
-        }
         model_module = getattr(transformers, arch, None)
         if model_module is None:
-            if "AutoModel" not in auto_map:
+            if "AutoModel" not in auto_modules:
+                if model_config.model_impl == ModelImpl.TRANSFORMERS:
+                    logger.warning(
+                        "Cannot resolve model class for '%s' and no auto_map.AutoModel "
+                        "is present. Skipping compatibility gate because "
+                        "--model-impl=transformers is explicitly requested.",
+                        arch,
+                    )
+                    continue
+                if "AutoModel" not in auto_map:
+                    raise ValueError(
+                        f"Cannot find model module. '{arch}' is not a registered "
+                        "model in the Transformers library (only relevant if the "
+                        "model is meant to be in Transformers) and 'AutoModel' is "
+                        "not present in the model config's 'auto_map' (relevant "
+                        "if the model is custom)."
+                    )
                 raise ValueError(
                     f"Cannot find model module. '{arch}' is not a registered "
-                    "model in the Transformers library (only relevant if the "
-                    "model is meant to be in Transformers) and 'AutoModel' is "
-                    "not present in the model config's 'auto_map' (relevant "
-                    "if the model is custom)."
+                    "model in the Transformers library and loading the custom "
+                    f"model from auto_map failed. The remote model code may be "
+                    f"incompatible with the installed transformers version."
                 )
             model_module = auto_modules["AutoModel"]
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
             if hasattr(model_module, "is_backend_compatible") and (
                 not model_module.is_backend_compatible()
             ):
-                raise ValueError(
-                    f"The Transformers implementation of {arch} is not "
-                    "compatible with SGLang."
+                logger.warning(
+                    "The Transformers implementation of %s reports it is not "
+                    "backend-compatible (_supports_attention_backend=False). "
+                    "Proceeding anyway because --model-impl=transformers was "
+                    "explicitly requested. The model may not work correctly.",
+                    arch,
                 )
-            architectures[i] = "TransformersForCausalLM"
         if model_config.model_impl == ModelImpl.AUTO:
             if hasattr(model_module, "is_backend_compatible") and (
                 not model_module.is_backend_compatible()
@@ -82,8 +178,7 @@ def resolve_transformers_arch(model_config: ModelConfig, architectures: list[str
                 "performance may not be optimal.",
                 arch,
             )
-            architectures[i] = "TransformersForCausalLM"
-    return architectures
+    return [backend_arch]
 
 
 def get_model_architecture(model_config: ModelConfig) -> Tuple[Type[nn.Module], str]:

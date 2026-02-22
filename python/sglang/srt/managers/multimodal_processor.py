@@ -43,11 +43,23 @@ def import_processors(package_name: str, overwrite: bool = False):
 def get_mm_processor(
     hf_config, server_args: ServerArgs, processor, transport_mode, **kwargs
 ) -> BaseMultimodalProcessor:
-    for model_cls, processor_cls in PROCESSOR_MAPPING.items():
-        if model_cls.__name__ in hf_config.architectures:
-            return processor_cls(
-                hf_config, server_args, processor, transport_mode, **kwargs
-            )
+    model_impl = str(getattr(server_args, "model_impl", "auto")).lower()
+
+    if model_impl != "transformers":
+        for model_cls, processor_cls in PROCESSOR_MAPPING.items():
+            if model_cls.__name__ in hf_config.architectures:
+                return processor_cls(
+                    hf_config, server_args, processor, transport_mode, **kwargs
+                )
+
+    if model_impl in {"auto", "transformers"}:
+        from sglang.srt.multimodal.processors.transformers_auto import (
+            TransformersAutoMultimodalProcessor,
+        )
+
+        return TransformersAutoMultimodalProcessor(
+            hf_config, server_args, processor, transport_mode, **kwargs
+        )
 
     raise ValueError(
         f"No processor registered for architecture: {hf_config.architectures}.\n"

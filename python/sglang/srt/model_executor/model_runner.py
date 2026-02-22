@@ -1654,6 +1654,13 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 "Disable piecewise CUDA graph because piecewise_cuda_graph has conflict with torch compile",
             )
             return False
+        if hasattr(self.model, "_can_torch_compile"):
+            log_info_on_rank0(
+                logger,
+                "Disable piecewise CUDA graph for transformers backend "
+                "(use --enable-torch-compile for stock torch.compile instead)",
+            )
+            return False
         if self.pp_size > 1:
             # TODO(yuwei): support PP
             log_info_on_rank0(
@@ -1905,6 +1912,14 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         if self.server_args.enable_torch_compile:
             set_torch_compile_config()
+            if hasattr(self.model, "_can_torch_compile"):
+                if not self.model._can_torch_compile:
+                    log_info_on_rank0(
+                        logger,
+                        "Transformers backend model reports it is not torch.compile "
+                        "compatible (e.g. dynamic rope scaling). Disabling torch.compile.",
+                    )
+                    self.server_args.enable_torch_compile = False
 
         if self.eagle_use_aux_hidden_state:
             self.model.set_eagle3_layers_to_capture()
