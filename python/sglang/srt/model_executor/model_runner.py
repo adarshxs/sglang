@@ -1654,7 +1654,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 "Disable piecewise CUDA graph because piecewise_cuda_graph has conflict with torch compile",
             )
             return False
-        if hasattr(self.model, "_can_torch_compile"):
+        if self.server_args.model_impl.lower() == ModelImpl.TRANSFORMERS:
             log_info_on_rank0(
                 logger,
                 "Disable piecewise CUDA graph for transformers backend "
@@ -1912,8 +1912,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         if self.server_args.enable_torch_compile:
             set_torch_compile_config()
-            if hasattr(self.model, "_can_torch_compile"):
-                if not self.model._can_torch_compile:
+            if self.server_args.model_impl.lower() == ModelImpl.TRANSFORMERS:
+                if not getattr(self.model, "_can_torch_compile", True):
                     log_info_on_rank0(
                         logger,
                         "Transformers backend model reports it is not torch.compile "
