@@ -2,7 +2,7 @@ from typing import Optional
 
 import torch
 
-from sglang.srt.managers.schedule_batch import MultimodalDataItem
+from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
 from sglang.srt.multimodal.processors.base_processor import (
     BaseMultimodalProcessor,
     MultimodalSpecialTokens,
@@ -124,18 +124,18 @@ class TransformersAutoMultimodalProcessor(BaseMultimodalProcessor):
         """Extract MultimodalDataItem objects from the HF processor output."""
         items = self.collect_mm_items_from_processor_output(processor_output)
 
-        mm_token_id = self.mm_tokens.image_token_id
-        if mm_token_id is not None and len(items) > 0:
-            offsets = self.get_mm_items_offset(input_ids, mm_token_id)
-            if len(offsets) > 0:
-                for item in items:
-                    item.offsets = offsets
-            elif self.mm_tokens.video_token_id is not None:
-                offsets = self.get_mm_items_offset(
-                    input_ids, self.mm_tokens.video_token_id
-                )
-                for item in items:
-                    item.offsets = offsets
+        modality_to_token_id = {
+            Modality.IMAGE: self.mm_tokens.image_token_id,
+            Modality.MULTI_IMAGES: self.mm_tokens.image_token_id,
+            Modality.VIDEO: self.mm_tokens.video_token_id,
+            Modality.AUDIO: self.mm_tokens.audio_token_id,
+        }
+
+        for item in items:
+            token_id = modality_to_token_id.get(item.modality)
+            if token_id is not None:
+                item.offsets = self.get_mm_items_offset(input_ids, token_id)
+
         return items
 
     async def process_mm_data_async(
