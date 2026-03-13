@@ -129,23 +129,24 @@ def resolve_transformers_arch(model_config: ModelConfig, architectures: list[str
             )
         model_module = getattr(transformers, arch, None)
         if model_module is None:
-            if "AutoModel" not in auto_modules:
-                if model_config.model_impl == ModelImpl.TRANSFORMERS:
-                    logger.warning(
-                        "Cannot resolve model class for '%s' and no auto_map.AutoModel "
-                        "is present. Skipping compatibility gate because "
-                        "--model-impl=transformers is explicitly requested.",
-                        arch,
-                    )
-                    continue
-                if "AutoModel" not in auto_map:
-                    raise ValueError(
-                        f"Cannot find model module. '{arch}' is not a registered "
-                        "model in the Transformers library (only relevant if the "
-                        "model is meant to be in Transformers) and 'AutoModel' is "
-                        "not present in the model config's 'auto_map' (relevant "
-                        "if the model is custom)."
-                    )
+            has_auto_model = "AutoModel" in auto_modules
+            if not has_auto_model and model_config.model_impl == ModelImpl.TRANSFORMERS:
+                logger.warning(
+                    "Cannot resolve model class for '%s' and no auto_map.AutoModel "
+                    "is present. Skipping compatibility gate because "
+                    "--model-impl=transformers is explicitly requested.",
+                    arch,
+                )
+                continue
+            if not has_auto_model and "AutoModel" not in auto_map:
+                raise ValueError(
+                    f"Cannot find model module. '{arch}' is not a registered "
+                    "model in the Transformers library (only relevant if the "
+                    "model is meant to be in Transformers) and 'AutoModel' is "
+                    "not present in the model config's 'auto_map' (relevant "
+                    "if the model is custom)."
+                )
+            if not has_auto_model:
                 raise ValueError(
                     f"Cannot find model module. '{arch}' is not a registered "
                     "model in the Transformers library and loading the custom "

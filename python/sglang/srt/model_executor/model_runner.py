@@ -1891,14 +1891,17 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         if self.server_args.enable_torch_compile:
             set_torch_compile_config()
-            if self.server_args.model_impl.lower() == ModelImpl.TRANSFORMERS:
-                if not getattr(self.model, "_can_torch_compile", True):
-                    log_info_on_rank0(
-                        logger,
-                        "Transformers backend model reports it is not torch.compile "
-                        "compatible (e.g. dynamic rope scaling). Disabling torch.compile.",
-                    )
-                    self.server_args.enable_torch_compile = False
+            should_disable_torch_compile = (
+                self.server_args.model_impl.lower() == ModelImpl.TRANSFORMERS
+                and not getattr(self.model, "_can_torch_compile", True)
+            )
+            if should_disable_torch_compile:
+                log_info_on_rank0(
+                    logger,
+                    "Transformers backend model reports it is not torch.compile "
+                    "compatible (e.g. dynamic rope scaling). Disabling torch.compile.",
+                )
+                self.server_args.enable_torch_compile = False
 
         if self.eagle_use_aux_hidden_state:
             self.model.set_eagle3_layers_to_capture()
