@@ -16,6 +16,7 @@
 # https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/transformers
 """Wrapper around `transformers` models."""
 
+import inspect
 import logging
 import re
 from collections.abc import Iterable, Mapping
@@ -188,6 +189,8 @@ def _normalize_tp_style(style: str) -> Style:
         "local_packed_rowwise": "rowwise",
         "isolated": "replicate",
         "local": "replicate",
+        "replicated_with_grad_allreduce": "replicate",
+        "moe_tp_experts": "replicate",
     }.get(style, style)
     if style not in {"colwise", "colwise_rep", "rowwise", "rowwise_rep", "replicate"}:
         raise ValueError(f"Unsupported TP style '{style}' for Transformers backend.")
@@ -639,13 +642,62 @@ class TransformersBase(nn.Module):
 
     # -- TP plan handling ---------------------------------------------------
     def _get_model_tp_plan(self) -> Mapping[str, str]:
-        return (
+        plan = (
             getattr(self.model, "tp_plan", None)
             or getattr(self.model, "_tp_plan", None)
             or getattr(self.model.config, "base_model_tp_plan", None)
             or getattr(self.text_config, "base_model_tp_plan", None)
-            or {}
         )
+        if plan:
+            return plan
+
+        plan = self._infer_tp_plan_from_children()
+        return plan if plan else {}
+
+    _LANGUAGE_MODEL_CHILD_NAMES = frozenset(
+        {"language_model", "text_model", "model", "lm"}
+    )
+
+    def _infer_tp_plan_from_children(self) -> dict[str, str]:
+        plan: dict[str, str] = {}
+        for child_name, child_module in self.model.named_children():
+            child_plan = getattr(child_module, "_tp_plan", None)
+            if child_plan:
+                plan.update({f"{child_name}.{k}": v for k, v in child_plan.items()})
+                continue
+
+            child_config = getattr(child_module, "config", None)
+            if child_config is not None:
+                child_tp = getattr(child_config, "base_model_tp_plan", None)
+                if child_tp:
+                    plan.update(
+                        {f"{child_name}.{k}": v for k, v in child_tp.items()}
+                    )
+                    continue
+
+            if child_name not in self._LANGUAGE_MODEL_CHILD_NAMES:
+                continue
+            if child_config is None:
+                continue
+            model_type = getattr(child_config, "model_type", "")
+            base_type = (
+                model_type.replace("_vl_text", "")
+                .replace("_vl", "")
+                .replace("_text", "")
+            )
+            if base_type and base_type != model_type:
+                try:
+                    from transformers import AutoConfig
+
+                    base_cfg = AutoConfig.for_model(base_type)
+                    base_tp = getattr(base_cfg, "base_model_tp_plan", None)
+                    if base_tp:
+                        plan.update(
+                            {f"{child_name}.{k}": v for k, v in base_tp.items()}
+                        )
+                except Exception:
+                    pass
+        return plan
 
     def _normalize_tp_plan(self, tp_plan: Mapping[str, str]) -> dict[str, Style]:
         normalized = {}
@@ -974,7 +1026,9 @@ class TransformersBase(nn.Module):
         )
 
         if not self.pp_group.is_last_rank:
-            return PPProxyTensors({"hidden_states": hidden_states})
+            return PPProxyTensors(
+                {"hidden_states": hidden_states, "residual": hidden_states}
+            )
 
         if get_embedding:
             assert (
@@ -1387,7 +1441,12 @@ class MultiModalMixin:
             tti = forward_batch.token_type_ids
             if tti.ndim == 1:
                 tti = tti.unsqueeze(0)
-            kwargs["token_type_ids"] = tti
+            token_type_key = (
+                "mm_token_type_ids"
+                if "mm_token_type_ids" in inspect.signature(self.model.forward).parameters
+                else "token_type_ids"
+            )
+            kwargs[token_type_key] = tti
 
         if (
             not forward_batch.forward_mode.is_decode()

@@ -45,12 +45,15 @@ def get_mm_processor(
 ) -> BaseMultimodalProcessor:
     model_impl = str(getattr(server_args, "model_impl", "auto")).lower()
 
-    if model_impl != "transformers":
-        for model_cls, processor_cls in PROCESSOR_MAPPING.items():
-            if model_cls.__name__ in hf_config.architectures:
-                return processor_cls(
-                    hf_config, server_args, processor, transport_mode, **kwargs
-                )
+    for model_cls, processor_cls in PROCESSOR_MAPPING.items():
+        if model_cls.__name__ not in hf_config.architectures:
+            continue
+        if model_impl != "transformers" or getattr(
+            processor_cls, "supports_transformers_backend", False
+        ):
+            return processor_cls(
+                hf_config, server_args, processor, transport_mode, **kwargs
+            )
 
     if model_impl in {"auto", "transformers"}:
         from sglang.srt.multimodal.processors.transformers_auto import (
