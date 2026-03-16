@@ -670,9 +670,7 @@ class TransformersBase(nn.Module):
             if child_config is not None:
                 child_tp = getattr(child_config, "base_model_tp_plan", None)
                 if child_tp:
-                    plan.update(
-                        {f"{child_name}.{k}": v for k, v in child_tp.items()}
-                    )
+                    plan.update({f"{child_name}.{k}": v for k, v in child_tp.items()})
                     continue
 
             if child_name not in self._LANGUAGE_MODEL_CHILD_NAMES:
@@ -1443,7 +1441,8 @@ class MultiModalMixin:
                 tti = tti.unsqueeze(0)
             token_type_key = (
                 "mm_token_type_ids"
-                if "mm_token_type_ids" in inspect.signature(self.model.forward).parameters
+                if "mm_token_type_ids"
+                in inspect.signature(self.model.forward).parameters
                 else "token_type_ids"
             )
             kwargs[token_type_key] = tti
