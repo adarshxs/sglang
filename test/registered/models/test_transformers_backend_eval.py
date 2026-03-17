@@ -15,7 +15,14 @@ class TestTransformersBackendEval(DefaultServerBase):
     gsm8k_num_questions = 30
     gsm8k_accuracy_thres = 0.5
     gsm8k_parallel = 30
-    other_args = ["--model-impl", "transformers"]
+    other_args = [
+        "--model-impl",
+        "transformers",
+        "--enable-torch-compile",
+        "--torch-compile-max-bs",
+        "4",
+        "--disable-cuda-graph",
+    ]
 
     def test_gsm8k(self):
         args = SimpleNamespace(
