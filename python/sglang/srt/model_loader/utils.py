@@ -95,6 +95,14 @@ def _get_transformers_backend_arch(
     return arch + base_arch
 
 
+def _model_impl_from_architecture(architecture: str) -> ModelImpl:
+    if architecture.startswith("Transformers"):
+        return ModelImpl.TRANSFORMERS
+    if architecture.startswith("MindSpore"):
+        return ModelImpl.MINDSPORE
+    return ModelImpl.SGLANG
+
+
 def resolve_transformers_arch(model_config: ModelConfig, architectures: list[str]):
     backend_arch = _get_transformers_backend_arch(model_config, architectures)
 
@@ -210,7 +218,29 @@ def get_model_architecture(model_config: ModelConfig) -> Tuple[Type[nn.Module], 
         architectures = ["MindSporeForCausalLM"]
     elif not is_native_supported or model_config.model_impl == ModelImpl.TRANSFORMERS:
         architectures = resolve_transformers_arch(model_config, architectures)
-    return ModelRegistry.resolve_model_cls(architectures)
+    model_cls, resolved_arch = ModelRegistry.resolve_model_cls(architectures)
+    setattr(model_config, "_resolved_model_arch", resolved_arch)
+    setattr(
+        model_config,
+        "_resolved_model_impl",
+        _model_impl_from_architecture(resolved_arch),
+    )
+    return model_cls, resolved_arch
+
+
+def get_resolved_model_impl(model_config: ModelConfig) -> ModelImpl:
+    resolved_model_impl = getattr(model_config, "_resolved_model_impl", None)
+    if resolved_model_impl is not None:
+        return resolved_model_impl
+
+    resolved_arch = getattr(model_config, "_resolved_model_arch", None)
+    if resolved_arch is None:
+        _, resolved_arch = get_model_architecture(model_config)
+
+    resolved_model_impl = _model_impl_from_architecture(resolved_arch)
+    setattr(model_config, "_resolved_model_arch", resolved_arch)
+    setattr(model_config, "_resolved_model_impl", resolved_model_impl)
+    return resolved_model_impl
 
 
 def get_architecture_class_name(model_config: ModelConfig) -> str:

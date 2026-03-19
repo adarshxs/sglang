@@ -265,7 +265,11 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             # We create mm_processor for any skip_tokenizer_init to make sure we still encode
             # images even with skip_tokenizer_init=False.
             self.mm_processor = get_mm_processor(
-                self.model_config.hf_config, server_args, _processor, transport_mode
+                self.model_config.hf_config,
+                server_args,
+                _processor,
+                transport_mode,
+                model_config=self.model_config,
             )
             self.mm_data_processor = AsyncMMDataProcessor(
                 self.mm_processor,

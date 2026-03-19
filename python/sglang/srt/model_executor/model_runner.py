@@ -1934,9 +1934,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         if self.server_args.enable_torch_compile:
             set_torch_compile_config()
-            should_disable_torch_compile = (
-                self.server_args.model_impl.lower() == ModelImpl.TRANSFORMERS
-                and not getattr(self.model, "_can_torch_compile", True)
+            should_disable_torch_compile = not getattr(
+                self.model, "_can_torch_compile", True
             )
             if should_disable_torch_compile:
                 log_info_on_rank0(

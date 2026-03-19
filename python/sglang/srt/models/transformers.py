@@ -115,6 +115,54 @@ def _getattr_first(obj, names, default=None):
     return default
 
 
+def _resolve_attention_backend_model_cls(config: PretrainedConfig):
+    model_cls = getattr(transformers, getattr(config, "architectures", [""])[0], None)
+    if model_cls is not None:
+        return model_cls
+
+    auto_map = getattr(config, "auto_map", {}) or {}
+    for key in ("AutoModel", "AutoModelForCausalLM"):
+        if key not in auto_map:
+            continue
+        try:
+            return get_class_from_dynamic_module(
+                auto_map[key],
+                getattr(config, "_name_or_path", ""),
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to load dynamic module from auto_map[%s]: %s.",
+                key,
+                e,
+            )
+    return None
+
+
+def _encoder_accepts_feature_kwarg(encoder, feature_kwarg: str) -> bool:
+    try:
+        sig = inspect.signature(encoder)
+    except (TypeError, ValueError):
+        return False
+
+    if feature_kwarg in sig.parameters:
+        return True
+
+    has_var_keyword = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    if not has_var_keyword:
+        return False
+
+    required_positional_params = [
+        p
+        for p in sig.parameters.values()
+        if p.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        and p.default is inspect.Parameter.empty
+    ]
+    return len(required_positional_params) == 0
+
+
 @contextmanager
 def _init_on_device_without_buffers(device: torch.device):
     """Initialize model parameters on *device* while leaving buffers on CPU.
@@ -406,6 +454,13 @@ class TransformersFusedMoE(nn.Module):
                     except TypeError:
                         default_weight_loader(param, loaded_weight)
                     loaded.add(name)
+                else:
+                    logger.warning(
+                        "MoE weight '%s' in layer '%s' could not be matched to any "
+                        "parameter and will be skipped.",
+                        name,
+                        self.layer_name,
+                    )
         return loaded
 
 
@@ -417,16 +472,13 @@ def _transformers_moe_forward(
 ) -> torch.Tensor:
     self = _TRANSFORMERS_MOE_LAYERS[layer_name]
     # Record expert distribution for EPLB
-    try:
-        from sglang.srt.eplb.expert_distribution import (
-            get_global_expert_distribution_recorder,
-        )
+    from sglang.srt.eplb.expert_distribution import (
+        get_global_expert_distribution_recorder,
+    )
 
-        recorder = get_global_expert_distribution_recorder()
-        if recorder is not None and recorder.recording:
-            recorder.record(self.experts.layer_id, topk_ids)
-    except Exception:
-        pass
+    recorder = get_global_expert_distribution_recorder()
+    with recorder.with_current_layer(self.experts.layer_id):
+        recorder.on_select_experts(topk_ids=topk_ids)
     topk_output = StandardTopKOutput(
         topk_weights=topk_weights,
         topk_ids=topk_ids,
@@ -543,25 +595,7 @@ class TransformersBase(nn.Module):
                 )
 
         # Resolve model class for _supports_attention_backend check
-        model_cls = getattr(
-            transformers, getattr(config, "architectures", [""])[0], None
-        )
-        if model_cls is None:
-            auto_map = getattr(config, "auto_map", {}) or {}
-            for key in ("AutoModel", "AutoModelForCausalLM"):
-                if key in auto_map:
-                    try:
-                        model_cls = get_class_from_dynamic_module(
-                            auto_map[key],
-                            getattr(config, "_name_or_path", ""),
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "Failed to load dynamic module from auto_map[%s]: %s.",
-                            key,
-                            e,
-                        )
-                    break
+        model_cls = _resolve_attention_backend_model_cls(config)
 
         supports_backend = (
             getattr(model_cls, "_supports_attention_backend", True)
@@ -693,8 +727,12 @@ class TransformersBase(nn.Module):
                         plan.update(
                             {f"{child_name}.{k}": v for k, v in base_tp.items()}
                         )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(
+                        "Could not infer TP plan from base model type '%s': %s",
+                        base_type,
+                        e,
+                    )
         return plan
 
     def _normalize_tp_plan(self, tp_plan: Mapping[str, str]) -> dict[str, Style]:
@@ -1413,11 +1451,11 @@ class MultiModalMixin:
                 dtype=target_dtype,
                 device=target_device,
             )
-            try:
-                result = encoder(feature, **kwargs)
-            except TypeError:
+            if _encoder_accepts_feature_kwarg(encoder, feature_kwarg):
                 kwargs[feature_kwarg] = feature
                 result = encoder(**kwargs)
+            else:
+                result = encoder(feature, **kwargs)
             outputs.append(self._to_tensor_output(result))
         return torch.cat(outputs, dim=0)
 

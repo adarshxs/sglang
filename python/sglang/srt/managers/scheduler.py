@@ -176,6 +176,7 @@ from sglang.srt.mem_cache.common import release_kv_cache
 from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.mem_cache.session_aware_cache import SessionAwareCache
 from sglang.srt.model_executor.forward_batch_info import ForwardMode, PPProxyTensors
+from sglang.srt.model_loader.utils import get_resolved_model_impl
 from sglang.srt.multiplex.multiplexing_mixin import SchedulerMultiplexMixin
 from sglang.srt.observability.req_time_stats import (
     real_time,
@@ -660,6 +661,9 @@ class Scheduler(
 
     def init_cache_with_memory_pool(self):
         server_args = self.server_args
+        uses_transformers_backend = (
+            get_resolved_model_impl(self.model_config) == ModelImpl.TRANSFORMERS
+        )
 
         # Hybrid memory pool
         self.is_hybrid_swa = self.tp_worker.is_hybrid_swa
@@ -680,8 +684,7 @@ class Scheduler(
         )
 
         self.disable_radix_cache = server_args.disable_radix_cache or (
-            self.model_config.is_multimodal
-            and self.model_config.model_impl == ModelImpl.TRANSFORMERS
+            self.model_config.is_multimodal and uses_transformers_backend
         )
         if self.disable_radix_cache and not server_args.disable_radix_cache:
             logger.warning(
@@ -690,10 +693,7 @@ class Scheduler(
             )
 
         effective_chunked_prefill_size = server_args.chunked_prefill_size
-        if (
-            self.model_config.is_multimodal
-            and self.model_config.model_impl == ModelImpl.TRANSFORMERS
-        ):
+        if self.model_config.is_multimodal and uses_transformers_backend:
             effective_chunked_prefill_size = None
 
         params = CacheInitParams(
@@ -814,11 +814,14 @@ class Scheduler(
 
     def init_chunked_prefill(self):
         self.chunked_prefill_size = self.server_args.chunked_prefill_size
+        uses_transformers_backend = (
+            get_resolved_model_impl(self.model_config) == ModelImpl.TRANSFORMERS
+        )
         if (
             self.chunked_prefill_size is not None
             and self.chunked_prefill_size > 0
             and self.model_config.is_multimodal
-            and self.model_config.model_impl == ModelImpl.TRANSFORMERS
+            and uses_transformers_backend
         ):
             logger.warning(
                 "Chunked prefill is disabled for multimodal models with the "
