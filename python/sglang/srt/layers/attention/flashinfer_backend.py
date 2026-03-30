@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Callable, List, Optional, Union
 
 import torch
 
+from sglang.kernel_api_logging import debug_kernel_api
 from sglang.srt.compilation.piecewise_context_manager import is_in_piecewise_cuda_graph
 from sglang.srt.dllm.config import DllmConfig
 from sglang.srt.environ import envs
@@ -748,6 +749,7 @@ class FlashInferAttnBackend(AttentionBackend):
     def get_cuda_graph_seq_len_fill_value(self):
         return 1
 
+    @debug_kernel_api
     def forward_extend(
         self,
         q: torch.Tensor,
@@ -862,6 +864,7 @@ class FlashInferAttnBackend(AttentionBackend):
 
         return o.view(-1, layer.tp_q_head_num * layer.head_dim)
 
+    @debug_kernel_api
     def forward_decode(
         self,
         q: torch.Tensor,
@@ -1045,16 +1048,19 @@ class FlashInferIndicesUpdaterDecode:
         fixed_split_size: Optional[int] = None,
         disable_split_kv: Optional[bool] = None,
     ):
+        # Cache encoder_lens on CPU to avoid GPU→CPU transfer per call
+        encoder_lens_cpu = encoder_lens.cpu() if encoder_lens is not None else None
         for wrapper_id in range(2):
             if wrapper_id == 0:
-                # Normal attention
                 paged_kernel_lens = seq_lens
                 kv_start_idx = encoder_lens
+                kv_lens_cpu = seq_lens_cpu
             else:
-                # Cross attention
+                # Cross-attention: attend to encoder tokens only
                 paged_kernel_lens = encoder_lens
                 kv_start_idx = torch.zeros_like(encoder_lens)
                 seq_lens_sum = encoder_lens.sum().item()
+                kv_lens_cpu = encoder_lens_cpu
 
             self.call_begin_forward(
                 decode_wrappers[wrapper_id],
@@ -1064,7 +1070,7 @@ class FlashInferIndicesUpdaterDecode:
                 self.kv_indptr[wrapper_id],
                 kv_start_idx,
                 spec_info,
-                seq_lens_cpu=seq_lens_cpu,
+                seq_lens_cpu=kv_lens_cpu,
             )
 
     def call_begin_forward(
