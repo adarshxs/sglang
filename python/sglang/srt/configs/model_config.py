@@ -386,6 +386,11 @@ class ModelConfig:
             if is_draft_model
             else server_args.decrypted_config_file
         )
+        # Speculative draft architectures (EAGLE/EAGLE3/MTP heads) are
+        # SGLang-specific classes with no transformers-library counterpart,
+        # so the draft must always use the native implementation even when
+        # the target is served with --model-impl transformers.
+        model_impl = ModelImpl.AUTO if is_draft_model else server_args.model_impl
         return ModelConfig(
             model_path=model_path or server_args.model_path,
             trust_remote_code=server_args.trust_remote_code,
@@ -396,7 +401,7 @@ class ModelConfig:
             enable_multimodal=server_args.enable_multimodal,
             dtype=server_args.dtype,
             quantization=quantization,
-            model_impl=server_args.model_impl,
+            model_impl=model_impl,
             sampling_defaults=server_args.sampling_defaults,
             quantize_and_serve=server_args.quantize_and_serve,
             override_config_file=override_config_file,

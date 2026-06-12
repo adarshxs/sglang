@@ -45,6 +45,25 @@ class BaseLayerWithLoRA(nn.Module):
         if hasattr(self.base_layer, "bias") and self.base_layer.bias is not None:
             self.bias = self.base_layer.bias
 
+        # The Transformers modeling backend wraps its linears in HF-compatible
+        # classes (marked by `parent_cls`) that consume batch-first 3D
+        # activations and return bare tensors, while LoRA wrappers expect flat
+        # 2D inputs and return (output, bias). Adapt the convention when
+        # wrapping such a layer; native models are unaffected.
+        if getattr(base_layer, "parent_cls", None) is not None:
+            inner_forward = self.forward
+
+            def hf_compatible_forward(x: torch.Tensor, *args, **kwargs):
+                orig_shape = x.shape
+                if x.ndim > 2:
+                    x = x.reshape(-1, orig_shape[-1])
+                output, _ = inner_forward(x, *args, **kwargs)
+                if len(orig_shape) > 2:
+                    output = output.reshape(*orig_shape[:-1], output.shape[-1])
+                return output
+
+            self.forward = hf_compatible_forward
+
     def forward(self, x: torch.Tensor):
         return self.base_layer.forward(x)
 

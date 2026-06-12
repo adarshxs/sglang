@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 class PoolingType(IntEnum):
     LAST = 0
     CLS = 1
+    MEAN = 2
 
 
 @dataclass
@@ -48,7 +49,7 @@ def pool_hidden_states(
     hidden_states: torch.Tensor,
     forward_batch: ForwardBatch,
 ) -> torch.Tensor:
-    """Pool hidden_states by PoolingType (LAST/CLS).
+    """Pool hidden_states by PoolingType (LAST/CLS/MEAN).
 
     Raw pooling only — no normalize, no dim truncation.
     Returns shape (batch_size, hidden_size).
@@ -61,6 +62,18 @@ def pool_hidden_states(
         first_token_flat_indices = torch.zeros_like(prompt_lens)
         first_token_flat_indices[1:] += torch.cumsum(prompt_lens, dim=0)[:-1]
         return hidden_states[first_token_flat_indices]
+    elif pooling_type == PoolingType.MEAN:
+        prompt_lens = forward_batch.extend_seq_lens
+        last_token_indices = torch.cumsum(prompt_lens, dim=0) - 1
+        first_token_indices = last_token_indices - prompt_lens + 1
+        # Accumulate in float32 so long sequences do not overflow fp16
+        prefix_sums = torch.cumsum(hidden_states.to(torch.float32), dim=0)
+        zero_row = torch.zeros_like(prefix_sums[:1])
+        prefix_sums = torch.cat([zero_row, prefix_sums], dim=0)
+        seq_sums = (
+            prefix_sums[last_token_indices + 1] - prefix_sums[first_token_indices]
+        )
+        return (seq_sums / prompt_lens.unsqueeze(1)).to(hidden_states.dtype)
     else:
         raise ValueError(f"Unsupported pooling type: {pooling_type}")
 
